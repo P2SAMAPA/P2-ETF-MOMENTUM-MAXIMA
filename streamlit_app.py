@@ -45,8 +45,8 @@ try:
     import requests
     import urllib.parse
 
-@st.cache_data(ttl=3600)
-def load_data():
+    @st.cache_data(ttl=3600)
+    def load_data():
     try:
         token = os.getenv('GITLAB_API_TOKEN')
         if token is None:
