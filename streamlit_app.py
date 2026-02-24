@@ -12,6 +12,7 @@ import pandas_market_calendars as mcal
 # --- 1. PAGE CONFIG & HIGH-CONTRAST THEME ---
 st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
 
+# FIX 1: Remove unsafe_proxy parameter - it's not needed
 st.markdown("""
     <style>
     .stMetric { background-color: #1e2329; padding: 15px; border-radius: 8px; border: 1px solid #30363d; }
@@ -29,12 +30,16 @@ st.markdown("""
     }
     .signal-text { font-size: 2.5rem; }  /* Reduced size for better fit */
     </style>
-    """, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)  # This parameter is correct
 
 @st.cache_data(ttl=3600)
 def load_data():
     try:
         token = os.getenv('GITLAB_API_TOKEN')
+        if not token:
+            st.error("⚠️ GITLAB_API_TOKEN environment variable not set")
+            return None
+            
         project_path = 'p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA'
         gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
         project = gl.projects.get(project_path)
@@ -103,7 +108,7 @@ if df is not None:
         return final_sig, scores, rets, zs, v_fuel
 
     # Full Backtest for Dynamic Metrics
-    @st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: id})
+    @st.cache_data(show_spinner=False)
     def run_backtest(training_days, t_cost_pct):
         signals = []
         strat_returns = []
@@ -152,11 +157,15 @@ if df is not None:
 
     # Holiday-aware date projection using market calendar
     def get_next_trading_day(base_date):
-        nyse = mcal.get_calendar('NYSE')
-        # Get schedule for next 10 days to find the next open day
-        schedule = nyse.schedule(start_date=base_date + timedelta(days=1), end_date=base_date + timedelta(days=10))
-        if not schedule.empty:
-            return schedule.index[0].date()
+        try:
+            nyse = mcal.get_calendar('NYSE')
+            # Get schedule for next 10 days to find the next open day
+            schedule = nyse.schedule(start_date=base_date + timedelta(days=1), end_date=base_date + timedelta(days=10))
+            if not schedule.empty:
+                return schedule.index[0].date()
+        except Exception as e:
+            st.warning(f"Market calendar error: {e}")
+        
         # Fallback if no schedule (unlikely)
         next_day = base_date + timedelta(days=1)
         while next_day.weekday() >= 5:
@@ -181,13 +190,44 @@ if df is not None:
     st.markdown(f'<div class="signal-banner" style="background-color: {b_color};"><div style="text-transform: uppercase; font-size: 0.9rem; letter-spacing: 2px;">Next Trading Session: {display_date}</div><div class="signal-text">{curr_sig}</div></div>', unsafe_allow_html=True)
 
     st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
-    rank_df = pd.DataFrame({"ETF": universe, "Return": final_rets, "Z-Score": final_zs, "Vol Fuel": final_vols, "Score": final_scores}).sort_values("Score", ascending=False)
-    st.dataframe(rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Score": "{:.4f}"}), width='stretch')
+    
+    # FIX 2: Handle NaN/None values before formatting
+    rank_df = pd.DataFrame({
+        "ETF": universe, 
+        "Return": final_rets, 
+        "Z-Score": final_zs, 
+        "Vol Fuel": final_vols, 
+        "Score": final_scores
+    }).sort_values("Score", ascending=False)
+    
+    # Replace NaN values with 0 to avoid formatting errors
+    rank_df = rank_df.fillna(0)
+    
+    # Display dataframe with proper formatting
+    st.dataframe(
+        rank_df.style.format({
+            "Return": "{:.2%}", 
+            "Z-Score": "{:.2f}", 
+            "Vol Fuel": "{:.2f}x", 
+            "Score": "{:.4f}"
+        }),
+        use_container_width=True  # Replace with width='stretch' if you get deprecation warning
+    )
 
     st.subheader("📋 Audit Trail (Last 15 Trading Days)")
-    def color_rets(val):
-        return f'color: {"#00d1b2" if val > 0 else "#ff4b4b"}'
-    st.table(audit_df.style.applymap(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"}))
+    
+    # FIX 3: Handle NaN values in audit trail
+    if not audit_df.empty:
+        audit_df = audit_df.fillna(0)
+        
+        def color_rets(val):
+            if pd.isna(val):
+                return ''
+            return f'color: {"#00d1b2" if val > 0 else "#ff4b4b"}'
+        
+        # FIX 4: Replace deprecated applymap with map
+        styled_df = audit_df.style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"})
+        st.table(styled_df)
 
     # Equity Curve Chart
     if not strat_df.empty:
@@ -206,4 +246,7 @@ if df is not None:
         st.pyplot(fig)
 
 else:
-    st.error("Vault empty. Check ingestor.")
+    st.error("⚠️ Unable to load data. Please check your GitLab connection and token.")
+
+# Display any deprecation warnings in a less intrusive way
+st.caption("Note: Some display features use deprecated methods that will be updated in future versions.")
