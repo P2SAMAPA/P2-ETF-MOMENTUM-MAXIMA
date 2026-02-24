@@ -48,8 +48,8 @@ try:
         try:
             token = os.getenv('GITLAB_API_TOKEN')
             if token is None:
-            st.error("❌ GITLAB_API_TOKEN environment variable not set.")
-            return None
+                st.error("❌ GITLAB_API_TOKEN environment variable not set.")
+                return None
 
         # Use raw file URL (more reliable)
         project_path_encoded = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
@@ -60,17 +60,17 @@ try:
         response = requests.get(url, headers=headers, timeout=30)
         
             if response.status_code != 200:
-            st.error(f"❌ GitLab API error: {response.status_code}")
-            st.text(response.text[:500])
-            return None
+                st.error(f"❌ GitLab API error: {response.status_code}")
+                st.text(response.text[:500])
+                return None
 
         file_content = response.content
         st.write(f"📄 Downloaded {len(file_content)} bytes, first 20 bytes: {file_content[:20]}")
 
         # Check magic bytes
             if file_content[:4] != b'PAR1':
-            st.error("❌ File does not start with PAR1 – not a valid Parquet file.")
-            return None
+                st.error("❌ File does not start with PAR1 – not a valid Parquet file.")
+                return None
 
         # Try reading with pandas
             try:
