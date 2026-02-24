@@ -42,7 +42,6 @@ try:
     # ------------------------------------------------------------
     # DATA LOADING FROM GITLAB (with enhanced error checking)
     # ------------------------------------------------------------
-  
     @st.cache_data(ttl=3600)
     def load_data():
         try:
@@ -51,48 +50,47 @@ try:
                 st.error("❌ GITLAB_API_TOKEN environment variable not set.")
                 return None
 
-        # Use raw file URL (more reliable)
-        project_path_encoded = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
-        file_path_encoded = urllib.parse.quote('etf_momentum_data.parquet', safe='')
-        url = f"https://gitlab.com/api/v4/projects/{project_path_encoded}/repository/files/{file_path_encoded}/raw?ref=main"
-        
-        headers = {"PRIVATE-TOKEN": token}
-        response = requests.get(url, headers=headers, timeout=30)
-        
+            # Use raw file URL (more reliable)
+            project_path_encoded = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
+            file_path_encoded = urllib.parse.quote('etf_momentum_data.parquet', safe='')
+            url = f"https://gitlab.com/api/v4/projects/{project_path_encoded}/repository/files/{file_path_encoded}/raw?ref=main"
+
+            headers = {"PRIVATE-TOKEN": token}
+            response = requests.get(url, headers=headers, timeout=30)
+
             if response.status_code != 200:
                 st.error(f"❌ GitLab API error: {response.status_code}")
                 st.text(response.text[:500])
                 return None
 
-        file_content = response.content
-        st.write(f"📄 Downloaded {len(file_content)} bytes, first 20 bytes: {file_content[:20]}")
+            file_content = response.content
+            st.write(f"📄 Downloaded {len(file_content)} bytes, first 20 bytes: {file_content[:20]}")
 
-        # Check magic bytes
+            # Check magic bytes
             if file_content[:4] != b'PAR1':
                 st.error("❌ File does not start with PAR1 – not a valid Parquet file.")
                 return None
 
-        # Try reading with pandas
+            # Try reading with pandas
             try:
-            df = pd.read_parquet(BytesIO(file_content))
-            st.success(f"✅ Data loaded successfully. Shape: {df.shape}")
-            return df
-            except Exception as e:
-            st.error(f"❌ pandas.read_parquet failed: {e}")
-            # Attempt to read with pyarrow directly for more info
-            import pyarrow.parquet as pq
-            try:
-                table = pq.read_table(BytesIO(file_content))
-                st.write("✅ pyarrow could read the file. Converting to pandas...")
-                df = table.to_pandas()
+                df = pd.read_parquet(BytesIO(file_content))
+                st.success(f"✅ Data loaded successfully. Shape: {df.shape}")
                 return df
-            except Exception as e2:
-                st.error(f"❌ pyarrow also failed: {e2}")
-                return None
+            except Exception as e:
+                st.error(f"❌ pandas.read_parquet failed: {e}")
+                import pyarrow.parquet as pq
+                try:
+                    table = pq.read_table(BytesIO(file_content))
+                    st.write("✅ pyarrow could read the file. Converting to pandas...")
+                    df = table.to_pandas()
+                    return df
+                except Exception as e2:
+                    st.error(f"❌ pyarrow also failed: {e2}")
+                    return None
 
-    except Exception as e:
-        st.error(f"⚠️ Connection Error: {e}")
-        return None
+        except Exception as e:
+            st.error(f"⚠️ Connection Error in load_data: {e}")
+            return None
 
     df = load_data()
 
@@ -101,7 +99,7 @@ try:
         st.title("⚙️ Model Parameters")
         training_months = st.select_slider("Model Training Period (Months)", options=[3, 6, 9, 12, 15, 18], value=9)
         training_days = int(training_months * 21)
-        
+
         st.divider()
         t_costs_bps = st.slider("Transaction Cost (bps)", 10, 50, 10, 5)
         t_cost_pct = t_costs_bps / 10000
@@ -110,40 +108,40 @@ try:
     if df is not None:
         # Standardize data alignment
         df = df.sort_index().ffill()
-        
+
         st.info(f"📁 Dataset updated till: **{df.index.max().date()}**")
         st.title("🚀 P2-ETF Momentum Maxima")
-        
+
         universe = ['GLD', 'SLV', 'VNQ', 'TLT', 'TBT']
         benchmarks = ['SPY', 'AGG']
         prices = df.xs('Close', axis=1, level=1)[universe + benchmarks]
         volumes = df.xs('Volume', axis=1, level=1)[universe + benchmarks]
         daily_returns = prices.pct_change()
-        
+
         cash_daily_yields = df[('CASH', 'Daily_Rf')]
         cash_annual_rates = df[('CASH', 'Rate')] / 100
 
         def calculate_metrics_for_date(target_idx):
             actual_days = min(training_days, target_idx)
-            if actual_days < 5: 
+            if actual_days < 5:
                 return "CASH", pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe)
-                
+
             start_idx = target_idx - actual_days
             window_prices = prices.iloc[start_idx : target_idx + 1][universe]
             window_vols = volumes.iloc[start_idx : target_idx + 1][universe]
             window_daily_rf = cash_daily_yields.iloc[start_idx : target_idx + 1]
-            
+
             rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
             zs = (rets - rets.mean()) / (rets.std() + 1e-6)
             v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
-            
+
             scores = zs + rets + v_fuel
             top_asset = scores.idxmax()
-            
+
             # Absolute Momentum Hurdle vs Compounded Risk-Free Return
             rf_hurdle = np.prod(1 + window_daily_rf) - 1
             final_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
-            
+
             return final_sig, scores, rets, zs, v_fuel
 
         # Full Backtest for Dynamic Metrics
@@ -155,16 +153,16 @@ try:
             for i in range(training_days, len(df)):
                 sig, _, _, _, _ = calculate_metrics_for_date(i)
                 day_ret = daily_returns.iloc[i][sig] if sig != "CASH" else cash_daily_yields.iloc[i]
-                
+
                 if prev_sig is not None and sig != prev_sig:
                     day_ret -= t_cost_pct
                 strat_returns.append(day_ret)
                 signals.append({'Date': df.index[i], 'Signal': sig, 'Net_Return': day_ret})
                 prev_sig = sig
-            
+
             if not strat_returns:
                 return pd.DataFrame(), 0, 0, 0, 0
-            
+
             strat_df = pd.DataFrame(signals).set_index('Date')
             cum_ret = np.cumprod(1 + np.array(strat_returns)) - 1
             ann_ret = (np.prod(1 + np.array(strat_returns)) ** (252 / len(strat_returns))) - 1
@@ -172,7 +170,7 @@ try:
             sharpe = (ann_ret - rf_mean) / (np.std(strat_returns) * np.sqrt(252)) if np.std(strat_returns) > 0 else 0
             max_dd = np.min(cum_ret - np.maximum.accumulate(cum_ret)) if len(cum_ret) > 0 else 0
             daily_dd = np.min(strat_returns) if len(strat_returns) > 0 else 0
-            
+
             return strat_df, ann_ret, sharpe, max_dd, daily_dd
 
         strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest(training_days, t_cost_pct)
@@ -192,10 +190,11 @@ try:
         audit_df = strat_df.tail(15)
         hit_ratio = len(audit_df[audit_df['Net_Return'] > 0]) / len(audit_df) if len(audit_df) > 0 else 0
 
-        curr_sig, final_scores, final_rets, final_zs, final_vols = calculate_metrics_for_date(len(df)-1)
+        curr_sig, final_scores, final_rets, final_zs, final_vols = calculate_metrics_for_date(len(df) - 1)
 
         # Holiday-aware date projection (robust for 2026, but generalized)
         holidays_2026 = ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
+
         def get_next_trading_day(base_date):
             next_day = base_date + timedelta(days=1)
             while next_day.weekday() >= 5 or next_day.strftime('%Y-%m-%d') in holidays_2026:
@@ -225,6 +224,7 @@ try:
         st.dataframe(rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Score": "{:.4f}"}), width='stretch')
 
         st.subheader("📋 Audit Trail (Last 15 Trading Days)")
+
         def color_rets(val):
             return f'color: {"#00d1b2" if val > 0 else "#ff4b4b"}'
         # Fixed deprecated applymap → map
@@ -236,7 +236,7 @@ try:
             strat_cum_ret = (1 + strat_df['Net_Return']).cumprod() - 1
             spy_cum_ret = (1 + daily_returns['SPY'].loc[strat_df.index]).cumprod() - 1
             agg_cum_ret = (1 + daily_returns['AGG'].loc[strat_df.index]).cumprod() - 1
-            
+
             fig, ax = plt.subplots(figsize=(10, 5))
             ax.plot(strat_cum_ret, label='Strategy')
             ax.plot(spy_cum_ret, label='SPY')
