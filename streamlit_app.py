@@ -366,7 +366,7 @@ try:
         st.subheader("📊 Additional Filters")
         use_vol_filter = st.checkbox(
             "Volatility filter",
-            value=True,
+            value=False,
             key="vol_filter",
             help="Excludes assets with 20‑day annualized volatility above the selected threshold."
         )
@@ -381,7 +381,7 @@ try:
 
         use_ma_filter = st.checkbox(
             "Moving average filter (price > 200d MA)",
-            value=True,
+            value=False,
             key="ma_filter",
             help="Only assets trading above their 200‑day simple moving average are considered."
         )
