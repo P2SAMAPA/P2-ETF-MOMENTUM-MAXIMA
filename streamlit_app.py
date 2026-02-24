@@ -180,7 +180,7 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
 
     # Primary sort: rank_sum desc; secondary: rets desc (encode as fractional)
     rets_norm   = (rets_mat - rets_mat.min(axis=1, keepdims=True)) / \
-                  (rets_mat.ptp(axis=1, keepdims=True) + 1e-9) * 0.5
+                  ((rets_mat.max(axis=1, keepdims=True) - rets_mat.min(axis=1, keepdims=True)) + 1e-9) * 0.5
     score_mat   = masked_rank + rets_norm                  # (n, 5)
 
     best_asset_idx = score_mat.argmax(axis=1)              # (n,) index into universe
