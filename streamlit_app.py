@@ -84,24 +84,52 @@ try:
     with st.sidebar:
         st.title("⚙️ Model Parameters")
         training_months = st.select_slider(
-            "Training Period (Months)", options=[3,6,9,12,15,18], value=9, key="training_months"
+            "Training Period (Months)",
+            options=[3, 6, 9, 12, 15, 18],
+            value=9,
+            key="training_months"
         )
         training_days = int(training_months * 21)
 
         st.divider()
-        t_costs_bps = st.slider("Transaction Cost (bps)", 10, 50, 10, 5, key="tcost")
+        t_costs_bps = st.slider(
+            "Transaction Cost (bps)",
+            min_value=10, max_value=50, value=10, step=5,
+            key="tcost"
+        )
         t_cost_pct = t_costs_bps / 10000
 
         st.divider()
         st.subheader("🛑 Trailing Stop")
-        stop_loss_pct = -0.12
-        z_exit_threshold = 0.90
+        stop_loss_pct = st.slider(
+            "Stop loss (2-day cumulative return)",
+            min_value=-25, max_value=-10, value=-12, step=1,
+            format="%d%%",
+            key="stop_loss",
+            help="If 2‑day total return ≤ this value, switch to CASH."
+        ) / 100.0  # convert percent to decimal (e.g., -12% -> -0.12)
+
+        z_exit_threshold = st.slider(
+            "Z‑score exit threshold",
+            min_value=0.8, max_value=1.8, value=0.9, step=0.1,
+            key="z_exit",
+            help="Exit CASH when max Z‑score > this value."
+        )
 
         st.divider()
         st.subheader("📊 Additional Filters")
-        # Checkboxes only – threshold fixed at 40%
-        use_vol_filter = st.checkbox("Volatility filter (20d annualized < 40%)", value=True, key="vol_filter")
-        use_ma_filter = st.checkbox("Moving average filter (price > 200d MA)", value=True, key="ma_filter")
+        use_vol_filter = st.checkbox(
+            "Volatility filter (20d annualized < 40%)",
+            value=True,
+            key="vol_filter",
+            help="Excludes assets with 20‑day annualized volatility above 40% (typical high‑vol cutoff)."
+        )
+        use_ma_filter = st.checkbox(
+            "Moving average filter (price > 200d MA)",
+            value=True,
+            key="ma_filter",
+            help="Only assets trading above their 200‑day simple moving average are considered."
+        )
 
     # ------------------------------------------------------------
     # HELPER FUNCTIONS (cached)
@@ -290,15 +318,16 @@ try:
         "Score": final_scores
     }).sort_values("Score", ascending=False)
     st.dataframe(
-        rank_df.style.format({"Return":"{:.2%}","Z-Score":"{:.2f}","Vol Fuel":"{:.2f}x","Score":"{:.4f}"}),
+        rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Score": "{:.4f}"}),
         width='stretch',
         key="rank_matrix"
     )
 
     st.subheader("📋 Audit Trail (Last 15 Trading Days)")
-    def color_rets(v): return f'color: {"#00d1b2" if v>0 else "#ff4b4b"}'
+    def color_rets(v):
+        return f'color: {"#00d1b2" if v > 0 else "#ff4b4b"}'
     st.dataframe(
-        audit_df[['Signal','Net_Return']].style.map(color_rets, subset=['Net_Return']).format({"Net_Return":"{:.2%}"}),
+        audit_df[['Signal', 'Net_Return']].style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"}),
         use_container_width=True,
         key="audit_trail"
     )
@@ -306,7 +335,7 @@ try:
     # Equity curve (cached)
     @st.cache_data(ttl=600)
     def plot_curve():
-        fig, ax = plt.subplots(figsize=(10,5))
+        fig, ax = plt.subplots(figsize=(10, 5))
         strat_cum = (1 + strat_df['Net_Return']).cumprod() - 1
         spy_cum = (1 + daily_returns['SPY'].loc[strat_df.index]).cumprod() - 1
         agg_cum = (1 + daily_returns['AGG'].loc[strat_df.index]).cumprod() - 1
