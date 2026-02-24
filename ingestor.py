@@ -5,25 +5,22 @@ import os
 from datetime import datetime
 
 def fetch_data():
-    # 1. Define Universe
-    # Your core assets + Benchmarks
+    # 1. Define Universe (GLD, SLV, VNQ, TLT, TBT + Benchmarks)
     tickers = ['TLT', 'TBT', 'VNQ', 'SLV', 'GLD', 'SPY', 'AGG']
     
     all_data = []
 
     for ticker in tickers:
         print(f"Fetching {ticker}...")
-        # auto_adjust=True merges Adj Close into Close and handles splits/dividends
+        # auto_adjust=True handles splits/dividends into the Close price
         df = yf.download(ticker, progress=False, auto_adjust=True)
         
         if not df.empty:
-            # yfinance often returns a MultiIndex for columns (e.g., ['Close', 'Ticker'])
-            # We flatten it to ensure we can select 'Close' and 'Volume' reliably
+            # Flatten MultiIndex if yfinance returns one
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
-            # Keep Close and Volume, calculate Daily Return
-            # Note: With auto_adjust=True, 'Close' is the Adjusted Close
+            # Explicitly keep Close and Volume
             temp = df[['Close', 'Volume']].copy()
             temp['Return'] = temp['Close'].pct_change()
             
@@ -34,23 +31,20 @@ def fetch_data():
     # 2. Fetch FRED 3-Month T-Bill (Risk-Free Rate)
     print("Fetching 3-Month T-Bill from FRED...")
     try:
-        # DTB3 is the ticker for 3-Month Treasury Bill Secondary Market Rate
         rf_data = web.DataReader('DTB3', 'fred')
         rf_data.columns = pd.MultiIndex.from_product([['CASH'], ['Rate']])
-        # Convert % rate to daily decimal: (Rate / 100) / 252
+        # Convert % rate to daily decimal for calculations
         rf_data[('CASH', 'Daily_Rf')] = (rf_data[('CASH', 'Rate')] / 100) / 252
         all_data.append(rf_data)
     except Exception as e:
         print(f"FRED Failed: {e}")
 
-    # 3. Combine and Clean
+    # 3. Combine and Save
     if all_data:
         final_df = pd.concat(all_data, axis=1)
-        
-        # Forward fill missing values (holidays)
         final_df = final_df.ffill().dropna()
 
-        # Save to Parquet (High performance)
+        # Save to Parquet for the Streamlit App to consume
         final_df.to_parquet('etf_momentum_data.parquet')
         print(f"Pipeline Complete: Data stored for {tickers} + CASH")
     else:
