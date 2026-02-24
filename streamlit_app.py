@@ -107,7 +107,7 @@ try:
             format="%d%%",
             key="stop_loss",
             help="If 2‑day total return ≤ this value, switch to CASH."
-        ) / 100.0  # convert percent to decimal (e.g., -12% -> -0.12)
+        ) / 100.0
 
         z_exit_threshold = st.slider(
             "Z‑score exit threshold",
@@ -124,15 +124,15 @@ try:
             key="vol_filter",
             help="Excludes assets with 20‑day annualized volatility above the selected threshold."
         )
-        # Volatility threshold slider (only enabled if checkbox is checked)
-        vol_threshold = st.slider(
-            "Max annualized volatility",
-            min_value=0.20, max_value=0.50, value=0.40, step=0.05,
-            format="%.0f%%",
+        # Volatility threshold slider – integer percent (20–50)
+        vol_threshold_pct = st.slider(
+            "Max annualized volatility (%)",
+            min_value=20, max_value=50, value=40, step=5,
             disabled=not use_vol_filter,
-            key="vol_threshold",
-            help="Assets with 20‑day annualized volatility above this value are excluded when filter is active."
+            key="vol_threshold_pct",
+            help="Assets with 20‑day annualized volatility above this percentage are excluded when filter is active."
         )
+        vol_threshold = vol_threshold_pct / 100.0  # convert to decimal
 
         use_ma_filter = st.checkbox(
             "Moving average filter (price > 200d MA)",
@@ -156,7 +156,7 @@ try:
     sma_200 = compute_sma(prices[universe])
 
     # ------------------------------------------------------------
-    # CORE SIGNAL FUNCTION (uses outer variables, including vol_threshold)
+    # CORE SIGNAL FUNCTION
     # ------------------------------------------------------------
     def calculate_metrics_for_date(target_idx):
         actual_days = min(training_days, target_idx)
@@ -195,7 +195,7 @@ try:
         return final_sig, scores, rets, zs, v_fuel
 
     # ------------------------------------------------------------
-    # BACKTEST WITH STOP LOSS (cached, now includes vol_threshold)
+    # BACKTEST WITH STOP LOSS (cached, includes vol_threshold)
     # ------------------------------------------------------------
     @st.cache_data(show_spinner=False)
     def run_backtest_with_stop(training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
@@ -263,11 +263,12 @@ try:
 
         return strat_df, ann_ret, sharpe, max_dd, daily_dd
 
-    # Run backtest (pass vol_threshold)
-    strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
-        training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-        use_vol_filter, use_ma_filter, vol_threshold
-    )
+    # Run backtest (with spinner to indicate recomputation)
+    with st.spinner("Running backtest..."):
+        strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
+            training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
+            use_vol_filter, use_ma_filter, vol_threshold
+        )
 
     # Benchmark metrics (cached)
     @st.cache_data
