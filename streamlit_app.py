@@ -101,108 +101,164 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
                            use_vol_filter, use_ma_filter, vol_threshold):
 
     universe = list(prices_universe.columns)
+    n = len(prices_universe)
 
-    def _calculate_metrics_for_date(target_idx):
-        actual_days = min(training_days, target_idx)
-        if actual_days < 5:
-            empty = pd.Series(0, index=universe)
-            return "CASH", empty, empty, empty, empty, empty, empty, empty
+    # ------------------------------------------------------------------
+    # VECTORISED SIGNAL COMPUTATION
+    # Instead of looping row-by-row, compute all rolling windows at once
+    # using numpy stride tricks — this runs in milliseconds vs minutes.
+    # ------------------------------------------------------------------
 
-        start_idx = target_idx - actual_days
-        window_prices = prices_universe.iloc[start_idx: target_idx + 1]
-        window_vols = volumes_universe.iloc[start_idx: target_idx + 1]
-        window_daily_rf = cash_daily_yields.iloc[start_idx: target_idx + 1]
+    # Rolling window returns: price[t] / price[t - training_days] - 1
+    price_arr = prices_universe.values.astype(float)       # (n, 5)
+    vol_arr   = volumes_universe.values.astype(float)      # (n, 5)
 
-        rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
-        zs = (rets - rets.mean()) / (rets.std() + 1e-6)
-        v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
+    # Lookback-period returns for every row
+    lookback = np.full(n, training_days, dtype=int)
+    lookback = np.minimum(lookback, np.arange(n))          # can't look back before row 0
+    start_rows = np.arange(n) - lookback
+    start_rows = np.maximum(start_rows, 0)
 
-        ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
-        z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
-        v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
-        rank_sum = ret_rank + z_rank + v_rank
+    # rets[i, j] = price[i,j] / price[start_rows[i], j] - 1
+    rets_mat = price_arr / price_arr[start_rows] - 1       # (n, 5)
 
-        valid_assets = universe.copy()
-        if use_vol_filter:
-            current_vol = rolling_vol.iloc[target_idx]
-            valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
-        if use_ma_filter:
-            current_price = prices_universe.iloc[target_idx]
-            current_sma = sma_200.iloc[target_idx]
-            valid_assets = [a for a in valid_assets if current_price[a] > current_sma[a]]
+    # Z-scores across assets at each row
+    rets_mean = rets_mat.mean(axis=1, keepdims=True)
+    rets_std  = rets_mat.std(axis=1, keepdims=True) + 1e-6
+    zs_mat    = (rets_mat - rets_mean) / rets_std          # (n, 5)
 
-        if not valid_assets:
-            final_sig = "CASH"
-        else:
-            valid_df = pd.DataFrame({
-                'rank_sum': rank_sum[valid_assets],
-                'return': rets[valid_assets]
-            }).sort_values(['rank_sum', 'return'], ascending=[False, False])
-            top_asset = valid_df.index[0]
-            rf_hurdle = np.prod(1 + window_daily_rf) - 1
-            final_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
+    # Volume fuel: last vol / mean of prior window vols
+    # Use rolling mean shifted by 1 to exclude current row
+    vol_df       = pd.DataFrame(vol_arr, index=prices_universe.index, columns=universe)
+    vol_roll_mean = vol_df.shift(1).rolling(training_days, min_periods=1).mean()
+    vfuel_mat    = vol_arr / (vol_roll_mean.values + 1e-9)  # (n, 5)
 
-        return final_sig, rank_sum, rets, zs, v_fuel, ret_rank, z_rank, v_rank
+    # Ranks across assets (1=worst, 5=best) at each row
+    def row_rank(mat):
+        # scipy-free ordinal rank using argsort twice
+        temp = mat.argsort(axis=1)
+        ranks = np.empty_like(temp)
+        rows  = np.arange(mat.shape[0])[:, None]
+        ranks[rows, temp] = np.arange(mat.shape[1])
+        return ranks + 1  # 1-indexed
 
-    signals = []
-    strat_returns = []
-    stop_active = False
-    prev_sig = None
-    returns_history = []
-    total_rows = len(prices_universe)
+    ret_rank_mat = row_rank(rets_mat)   # (n, 5)
+    z_rank_mat   = row_rank(zs_mat)     # (n, 5)
+    v_rank_mat   = row_rank(vfuel_mat)  # (n, 5)
+    rank_sum_mat = ret_rank_mat + z_rank_mat + v_rank_mat  # (n, 5)  max=15
 
-    for i in range(training_days, total_rows):
-        model_sig, rank_sum, rets, zs, v_fuel, _, _, _ = _calculate_metrics_for_date(i)
-        max_z = zs.max()
+    # Max z-score per row (used for stop-loss exit)
+    max_z_arr = zs_mat.max(axis=1)      # (n,)
+
+    # Rolling RF hurdle: cumulative cash yield over training window
+    # Use log-sum approximation for speed: sum(log(1+rf)) ≈ log(prod(1+rf))
+    rf_arr = cash_daily_yields.values.astype(float)
+    log_rf = np.log1p(rf_arr)
+    rf_cumsum = np.cumsum(log_rf)
+    rf_start  = rf_cumsum[start_rows]
+    # rf_start for row 0 should be 0
+    rf_start[0] = 0.0
+    rf_hurdle_arr = np.expm1(rf_cumsum - rf_start)        # (n,)
+
+    # Filters: boolean mask (n, 5)  True = asset is tradeable
+    tradeable = np.ones((n, len(universe)), dtype=bool)
+
+    if use_vol_filter:
+        vol_mask = rolling_vol.values <= vol_threshold     # (n, 5)
+        tradeable &= vol_mask
+
+    if use_ma_filter:
+        ma_mask = prices_universe.values > sma_200.values  # (n, 5)
+        tradeable &= ma_mask
+
+    # ------------------------------------------------------------------
+    # MODEL SIGNAL: best rank_sum among tradeable assets, tie→highest ret
+    # ------------------------------------------------------------------
+    # Mask out non-tradeable assets by setting their rank_sum very low
+    masked_rank = rank_sum_mat.astype(float).copy()
+    masked_rank[~tradeable] = -999.0
+
+    # Primary sort: rank_sum desc; secondary: rets desc (encode as fractional)
+    rets_norm   = (rets_mat - rets_mat.min(axis=1, keepdims=True)) / \
+                  (rets_mat.ptp(axis=1, keepdims=True) + 1e-9) * 0.5
+    score_mat   = masked_rank + rets_norm                  # (n, 5)
+
+    best_asset_idx = score_mat.argmax(axis=1)              # (n,) index into universe
+    best_rets      = rets_mat[np.arange(n), best_asset_idx]
+    any_tradeable  = tradeable.any(axis=1)                 # (n,) bool
+
+    # Model signal: asset name or "CASH"
+    model_signals = np.where(
+        (~any_tradeable) | (best_rets < rf_hurdle_arr),
+        "CASH",
+        np.array(universe)[best_asset_idx]
+    )
+
+    # ------------------------------------------------------------------
+    # STOP-LOSS LOGIC (sequential — must remain a loop, but it's O(n) int ops)
+    # ------------------------------------------------------------------
+    final_signals  = model_signals.copy()
+    stop_active    = False
+    strat_rets_arr = np.zeros(n)
+
+    # Pre-build return lookup: daily_returns for each asset + cash
+    dr_arr   = daily_returns_universe.values.astype(float)  # (n, 5)
+    cash_arr = cash_daily_yields.values.astype(float)        # (n,)
+    asset_to_col = {a: i for i, a in enumerate(universe)}
+
+    for i in range(training_days, n):
+        msig = model_signals[i]
+        mz   = max_z_arr[i]
 
         if stop_active:
-            if max_z > z_exit_threshold:
-                stop_active = False
-                final_sig = model_sig
-            else:
-                final_sig = "CASH"
+            stop_active = mz <= z_exit_threshold
+            sig = "CASH" if stop_active else msig
         else:
-            if len(returns_history) >= 2:
-                cum_two = (1 + returns_history[-2]) * (1 + returns_history[-1]) - 1
-                if cum_two <= stop_loss_pct:
+            if i >= training_days + 2:
+                cum2 = (1 + strat_rets_arr[i-2]) * (1 + strat_rets_arr[i-1]) - 1
+                if cum2 <= stop_loss_pct:
                     stop_active = True
-                    final_sig = "CASH"
+                    sig = "CASH"
                 else:
-                    final_sig = model_sig
+                    sig = msig
             else:
-                final_sig = model_sig
+                sig = msig
 
-        day_ret = daily_returns_universe[final_sig].iloc[i] if final_sig != "CASH" else cash_daily_yields.iloc[i]
-        if prev_sig is not None and final_sig != prev_sig:
+        final_signals[i] = sig
+        day_ret = dr_arr[i, asset_to_col[sig]] if sig != "CASH" else cash_arr[i]
+        # Transaction cost on switch
+        if i > training_days and final_signals[i] != final_signals[i-1]:
             day_ret -= t_cost_pct
+        strat_rets_arr[i] = day_ret
 
-        strat_returns.append(day_ret)
-        returns_history.append(day_ret)
-        signals.append({
-            'Date': prices_universe.index[i],
-            'Signal': final_sig,
-            'Net_Return': day_ret,
-            'ModelSignal': model_sig,
-            'StopActive': stop_active,
-            'MaxZ': max_z
-        })
-        prev_sig = final_sig
+    # ------------------------------------------------------------------
+    # ASSEMBLE OUTPUT
+    # ------------------------------------------------------------------
+    idx_slice    = prices_universe.index[training_days:]
+    final_slice  = final_signals[training_days:]
+    model_slice  = model_signals[training_days:]
+    rets_slice   = strat_rets_arr[training_days:]
+    maxz_slice   = max_z_arr[training_days:]
 
-    if not strat_returns:
+    strat_df = pd.DataFrame({
+        'Signal':     final_slice,
+        'Net_Return': rets_slice,
+        'ModelSignal': model_slice,
+        'MaxZ':        maxz_slice,
+    }, index=idx_slice)
+
+    if len(rets_slice) == 0:
         return pd.DataFrame(), 0, 0, 0, 0
 
-    strat_df = pd.DataFrame(signals).set_index('Date')
-    returns_arr = np.array(strat_returns)
-    cum_ret = np.cumprod(1 + returns_arr) - 1
+    returns_arr = rets_slice
+    ann_ret  = (np.prod(1 + returns_arr) ** (252 / len(returns_arr))) - 1
+    rf_mean  = cash_daily_yields.mean() * 252
+    sharpe   = (ann_ret - rf_mean) / (np.std(returns_arr) * np.sqrt(252)) if np.std(returns_arr) > 0 else 0
 
-    ann_ret = (np.prod(1 + returns_arr) ** (252 / len(returns_arr))) - 1
-    rf_mean = cash_daily_yields.mean() * 252
-    sharpe = (ann_ret - rf_mean) / (np.std(returns_arr) * np.sqrt(252)) if np.std(returns_arr) > 0 else 0
-
-    wealth = 1 + cum_ret
-    peak = np.maximum.accumulate(wealth)
+    wealth   = np.cumprod(1 + returns_arr)
+    peak     = np.maximum.accumulate(wealth)
     drawdown = (wealth - peak) / peak
-    max_dd = np.min(drawdown)
+    max_dd   = np.min(drawdown)
     daily_dd = np.min(returns_arr)
 
     return strat_df, ann_ret, sharpe, max_dd, daily_dd
