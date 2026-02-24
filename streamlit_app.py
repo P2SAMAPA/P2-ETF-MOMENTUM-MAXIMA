@@ -377,10 +377,11 @@ try:
     # ------------------------------------------------------------
     @st.fragment
     def update_dashboard():
-        if 'render_count' not in st.session_state:
-            st.session_state.render_count = 0
-        st.session_state.render_count += 1
-        st.caption(f"🔁 Render #{st.session_state.render_count}")
+        try:
+            if 'render_count' not in st.session_state:
+                st.session_state.render_count = 0
+            st.session_state.render_count += 1
+            st.caption(f"🔁 Render #{st.session_state.render_count}")
         strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
             prices[universe], volumes[universe], cash_daily_yields,
             daily_returns[universe], daily_returns['SPY'], daily_returns['AGG'],
@@ -499,6 +500,9 @@ try:
             agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
             fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
             st.pyplot(fig, clear_figure=False)
+
+        except Exception as frag_err:
+            st.error(f"❌ Fragment error:\n{traceback.format_exc()}")
 
     # ------------------------------------------------------------
     # CALL THE FRAGMENT
