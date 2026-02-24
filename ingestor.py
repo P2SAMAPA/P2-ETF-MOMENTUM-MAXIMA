@@ -12,28 +12,26 @@ def fetch_data():
 
     for ticker in tickers:
         print(f"Fetching {ticker}...")
-        # auto_adjust=True handles splits/dividends into the Close price
-        df = yf.download(ticker, progress=False, auto_adjust=True)
+        # Extended start date to ensure full history for training and HP optimization
+        df = yf.download(ticker, start="2007-01-01", progress=False, auto_adjust=True)
         
         if not df.empty:
-            # Flatten MultiIndex if yfinance returns one
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
-            # Explicitly keep Close and Volume
+            # Keep Close and Volume for Z-Score and Volume Fuel logic
             temp = df[['Close', 'Volume']].copy()
             temp['Return'] = temp['Close'].pct_change()
             
-            # Create Multi-Index (Ticker, Metric)
             temp.columns = pd.MultiIndex.from_product([[ticker], temp.columns])
             all_data.append(temp)
 
-    # 2. Fetch FRED 3-Month T-Bill (Risk-Free Rate)
+    # 2. Fetch FRED 3-Month T-Bill (Risk-Free Rate for Momentum Filter)
     print("Fetching 3-Month T-Bill from FRED...")
     try:
-        rf_data = web.DataReader('DTB3', 'fred')
+        rf_data = web.DataReader('DTB3', 'fred', start="2007-01-01")
         rf_data.columns = pd.MultiIndex.from_product([['CASH'], ['Rate']])
-        # Convert % rate to daily decimal for calculations
+        # Daily RF used for cost-adjusted optimization
         rf_data[('CASH', 'Daily_Rf')] = (rf_data[('CASH', 'Rate')] / 100) / 252
         all_data.append(rf_data)
     except Exception as e:
