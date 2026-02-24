@@ -1,10 +1,10 @@
-streamlit
-pandas
-numpy
-python-gitlab
-pyarrow
-fastparquet
-yfinance
-pandas-datareader
-pandas_market_calendars
-matplotlib  # Added for equity curve charting in UI
+streamlit==1.54.0
+pandas==2.3.3
+numpy==2.4.2
+python-gitlab==4.13.0
+pyarrow==23.0.1
+fastparquet==2025.12.0
+yfinance==1.2.0
+pandas-datareader==0.10.0
+pandas-market-calendars==5.3.0
+matplotlib==3.10.8
