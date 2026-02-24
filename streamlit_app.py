@@ -6,6 +6,14 @@ import requests
 import io
 # ... your other imports (gitlab, yfinance, etc.)
 
+import traceback
+
+try:
+    # Your existing code goes here (all imports and app logic)
+    pass
+except Exception as e:
+    st.error(f"An error occurred:\n{traceback.format_exc()}")
+
 # ------------------------------------------------------------
 # Read secrets from environment (set in HF Space Secrets)
 # ------------------------------------------------------------
