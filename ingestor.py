@@ -2,7 +2,6 @@ import pandas as pd
 import pandas_datareader.data as web
 import yfinance as yf
 import os
-import pandas_market_calendars as mcal
 from datetime import datetime
 
 def fetch_data():
@@ -10,16 +9,13 @@ def fetch_data():
     tickers = ['TLT', 'TBT', 'VNQ', 'SLV', 'GLD', 'SPY', 'AGG']
     all_data = []
 
-    # 2. Integrate NYSE Calendar for Date Validation
-    nyse = mcal.get_calendar('NYSE')
-    
     for ticker in tickers:
         print(f"Fetching {ticker}...")
         # Start from 2007 to provide padding for the 2008-2026 backtest
         df = yf.download(ticker, start="2007-01-01", progress=False, auto_adjust=True)
         
         if not df.empty:
-            # RECTIFIED: Flatten potential MultiIndex from yfinance
+            # Flatten potential MultiIndex from yfinance
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
@@ -41,7 +37,7 @@ def fetch_data():
         rf_data = web.DataReader('DTB3', 'fred', start="2007-01-01")
         rf_data.columns = pd.MultiIndex.from_product([['CASH'], ['Rate']])
         
-        # RECTIFIED: Calculate daily yield for the Audit Trail
+        # Calculate daily yield for the Audit Trail
         # Annual Rate / 100 / 252 trading days
         rf_data[('CASH', 'Daily_Rf')] = (rf_data[('CASH', 'Rate')] / 100) / 252
         all_data.append(rf_data)
