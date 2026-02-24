@@ -23,9 +23,9 @@ st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
 @st.cache_data(ttl=3600)
 def load_data():
     try:
-        token = os.getenv('GITLAB_API_TOKEN')
-        if token is None:
-            return None, "❌ GITLAB_API_TOKEN environment variable not set."
+        token = os.getenv('GITLAB_API_TOKEN') or st.secrets.get("GITLAB_API_TOKEN")
+        if not token:
+            return None, "❌ GITLAB_API_TOKEN not found in environment variables or Streamlit secrets."
 
         proj_enc = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
         file_enc = urllib.parse.quote('etf_momentum_data.parquet', safe='')
