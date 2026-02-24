@@ -7,3 +7,4 @@ fastparquet
 yfinance
 pandas-datareader
 matplotlib
+pandas_market_calendars
