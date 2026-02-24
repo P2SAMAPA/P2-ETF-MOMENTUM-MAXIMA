@@ -276,6 +276,32 @@ try:
     # ------------------------------------------------------------
     # FRAGMENT: all dynamic content reruns only when sliders change
     # ------------------------------------------------------------
+    # Benchmark metrics (cached) — defined at module level so cache key is stable
+    @st.cache_data
+    def benchmark_metrics(ticker):
+        bm_ret = daily_returns[ticker].dropna()
+        bm_ann = (np.prod(1 + bm_ret) ** (252 / len(bm_ret))) - 1 if len(bm_ret) > 0 else 0
+        rf = cash_daily_yields.mean() * 252
+        bm_sharpe = (bm_ann - rf) / (np.std(bm_ret) * np.sqrt(252)) if np.std(bm_ret) > 0 else 0
+        return bm_ann, bm_sharpe
+
+    # Equity curve figure (cached) — defined at module level so cache key is stable
+    # Uses @st.cache_data (not @st.cache_resource) because it is data-derived, not a shared global resource
+    @st.cache_data(show_spinner=False)
+    def get_equity_curve_fig(strat_series, spy_series, agg_series):
+        fig, ax = plt.subplots(figsize=(10, 5))
+        strat_cum = (1 + strat_series).cumprod() - 1
+        spy_cum = (1 + spy_series).cumprod() - 1
+        agg_cum = (1 + agg_series).cumprod() - 1
+        ax.plot(strat_cum, label='Strategy')
+        ax.plot(spy_cum, label='SPY')
+        ax.plot(agg_cum, label='AGG')
+        ax.legend()
+        ax.set_title('Cumulative Returns')
+        ax.set_ylabel('Return')
+        ax.grid(True, alpha=0.3)
+        return fig
+
     @st.fragment
     def update_dashboard():
         with st.spinner("Running backtest..."):
@@ -283,15 +309,6 @@ try:
                 training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
                 use_vol_filter, use_ma_filter, vol_threshold
             )
-
-        # Benchmark metrics (cached)
-        @st.cache_data
-        def benchmark_metrics(ticker):
-            bm_ret = daily_returns[ticker].dropna()
-            bm_ann = (np.prod(1 + bm_ret) ** (252 / len(bm_ret))) - 1 if len(bm_ret) > 0 else 0
-            rf = cash_daily_yields.mean() * 252
-            bm_sharpe = (bm_ann - rf) / (np.std(bm_ret) * np.sqrt(252)) if np.std(bm_ret) > 0 else 0
-            return bm_ann, bm_sharpe
 
         spy_ann, spy_sharpe = benchmark_metrics('SPY')
         agg_ann, agg_sharpe = benchmark_metrics('AGG')
@@ -358,22 +375,6 @@ try:
             use_container_width=True,
             key="audit_trail"
         )
-
-        # Equity curve (cached figure)
-        @st.cache_resource(ttl=600)
-        def get_equity_curve_fig(strat_series, spy_series, agg_series):
-            fig, ax = plt.subplots(figsize=(10, 5))
-            strat_cum = (1 + strat_series).cumprod() - 1
-            spy_cum = (1 + spy_series).cumprod() - 1
-            agg_cum = (1 + agg_series).cumprod() - 1
-            ax.plot(strat_cum, label='Strategy')
-            ax.plot(spy_cum, label='SPY')
-            ax.plot(agg_cum, label='AGG')
-            ax.legend()
-            ax.set_title('Cumulative Returns')
-            ax.set_ylabel('Return')
-            ax.grid(True, alpha=0.3)
-            return fig
 
         if not strat_df.empty:
             st.subheader("📈 Equity Curve")
