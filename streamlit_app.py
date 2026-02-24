@@ -7,6 +7,7 @@ import base64
 from io import BytesIO
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+import pandas_market_calendars as mcal
 
 # --- 1. PAGE CONFIG & HIGH-CONTRAST THEME ---
 st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
@@ -149,11 +150,16 @@ if df is not None:
 
     curr_sig, final_scores, final_rets, final_zs, final_vols = calculate_metrics_for_date(len(df)-1)
 
-    # Holiday-aware date projection (robust for 2026, but generalized)
-    holidays_2026 = ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
+    # Holiday-aware date projection using market calendar
     def get_next_trading_day(base_date):
+        nyse = mcal.get_calendar('NYSE')
+        # Get schedule for next 10 days to find the next open day
+        schedule = nyse.schedule(start_date=base_date + timedelta(days=1), end_date=base_date + timedelta(days=10))
+        if not schedule.empty:
+            return schedule.index[0].date()
+        # Fallback if no schedule (unlikely)
         next_day = base_date + timedelta(days=1)
-        while next_day.weekday() >= 5 or next_day.strftime('%Y-%m-%d') in holidays_2026:
+        while next_day.weekday() >= 5:
             next_day += timedelta(days=1)
         return next_day.date()
 
@@ -176,7 +182,7 @@ if df is not None:
 
     st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
     rank_df = pd.DataFrame({"ETF": universe, "Return": final_rets, "Z-Score": final_zs, "Vol Fuel": final_vols, "Score": final_scores}).sort_values("Score", ascending=False)
-    st.dataframe(rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Score": "{:.4f}"}), use_container_width=True)
+    st.dataframe(rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Score": "{:.4f}"}), width='stretch')
 
     st.subheader("📋 Audit Trail (Last 15 Trading Days)")
     def color_rets(val):
