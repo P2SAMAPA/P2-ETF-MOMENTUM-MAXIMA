@@ -540,11 +540,10 @@ try:
                             lambda i: "⭐ Best" if i == best_idx else ""
                         )
                         st.dataframe(
-                            hold_df.style.format({
+                            hold_df[["Hold", "Avg Net Ret", "Per-Day Net Ret", "Win Rate", "Best"]].style.format({
                                 "Avg Net Ret":     "{:.3%}",
                                 "Per-Day Net Ret": "{:.3%}",
                                 "Win Rate":        "{:.0%}",
-                                "# Signals":       "{:.0f}"
                             }),
                             use_container_width=True,
                             key="hold_period_table"
