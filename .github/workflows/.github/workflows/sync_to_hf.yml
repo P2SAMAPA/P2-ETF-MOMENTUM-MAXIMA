@@ -1,0 +1,23 @@
+name: Sync to Hugging Face Hub
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # allows manual trigger
+
+jobs:
+  sync-to-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # fetch all history for a clean push
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git push --force https://P2SAMAPA:$HF_TOKEN@huggingface.co/spaces/P2SAMAPA/P2-ETF-MOMENTUM-MAXIMA main
