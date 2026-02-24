@@ -518,34 +518,33 @@ try:
                         if len(gross_rets) == 0:
                             continue
 
-                        gross_arr  = np.array(gross_rets)
-                        net_arr    = gross_arr - 2 * t_cost_pct   # entry + exit cost
-                        avg_net    = net_arr.mean()
-                        win_rate   = (net_arr > 0).mean()
-                        # Annualise: (1 + avg_net_per_period)^(252/hold_days) - 1
-                        ann        = (1 + avg_net) ** (252 / hold_days) - 1
-                        n_obs      = len(gross_rets)
+                        gross_arr    = np.array(gross_rets)
+                        net_arr      = gross_arr - 2 * t_cost_pct   # entry + exit cost
+                        avg_net      = net_arr.mean()
+                        per_day_net  = avg_net / hold_days           # normalised: removes cost-drag bias
+                        win_rate     = (net_arr > 0).mean()
+                        n_obs        = len(gross_rets)
 
                         rows.append({
-                            "Hold":        label,
-                            "Avg Net Ret": avg_net,
-                            "Annualised":  ann,
-                            "Win Rate":    win_rate,
-                            "# Signals":   n_obs
+                            "Hold":            label,
+                            "Avg Net Ret":     avg_net,
+                            "Per-Day Net Ret": per_day_net,
+                            "Win Rate":        win_rate,
+                            "# Signals":       n_obs
                         })
 
                     if rows:
-                        hold_df = pd.DataFrame(rows)
-                        best_idx = hold_df["Annualised"].idxmax()
+                        hold_df  = pd.DataFrame(rows)
+                        best_idx = hold_df["Per-Day Net Ret"].idxmax()
                         hold_df["Best"] = hold_df.index.map(
                             lambda i: "⭐ Best" if i == best_idx else ""
                         )
                         st.dataframe(
                             hold_df.style.format({
-                                "Avg Net Ret": "{:.3%}",
-                                "Annualised":  "{:.1%}",
-                                "Win Rate":    "{:.0%}",
-                                "# Signals":   "{:.0f}"
+                                "Avg Net Ret":     "{:.3%}",
+                                "Per-Day Net Ret": "{:.3%}",
+                                "Win Rate":        "{:.0%}",
+                                "# Signals":       "{:.0f}"
                             }),
                             use_container_width=True,
                             key="hold_period_table"
