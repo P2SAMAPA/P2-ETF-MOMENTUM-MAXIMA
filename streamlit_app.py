@@ -5,31 +5,24 @@ import os
 from io import BytesIO
 from datetime import datetime
 
-# --- 1. PAGE CONFIG & THEME ---
-st.set_page_config(page_title="P2-ETF Forecaster", layout="wide", initial_sidebar_state="expanded")
+# --- 1. PAGE CONFIG & PROFESSIONAL THEME ---
+st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
 
+# Modern Slate/Teal Theme - Removed all "horrendous" green gradients
 st.markdown("""
     <style>
-    .main { background-color: #f5f7f9; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .signal-box {
+    .main { background-color: #0e1117; color: #e0e0e0; }
+    .stMetric { background-color: #161b22; padding: 15px; border-radius: 8px; border: 1px solid #30363d; }
+    .signal-banner {
         background-color: #00d1b2;
-        color: white;
-        padding: 30px;
-        border-radius: 15px;
+        color: #0e1117;
+        padding: 40px;
+        border-radius: 12px;
         text-align: center;
-        font-size: 2.2rem;
+        margin-bottom: 25px;
         font-weight: bold;
-        margin: 20px 0;
     }
-    .methodology-box {
-        background-color: #ffffff;
-        padding: 20px;
-        border-left: 5px solid #00d1b2;
-        border-radius: 5px;
-        margin-top: 30px;
-        font-size: 0.9rem;
-    }
+    .signal-text { font-size: 3.5rem; letter-spacing: -1px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -43,102 +36,82 @@ def load_data():
         file_info = project.files.get(file_path='etf_momentum_data.parquet', ref='main')
         return pd.read_parquet(BytesIO(file_info.decode()))
     except Exception as e:
-        st.error(f"⚠️ Vault Connection Error: {e}")
+        st.error(f"⚠️ Connection Error: {e}")
         return None
 
 df = load_data()
 
-# --- 2. SIDEBAR (CONFIGURATION) ---
+# --- 2. SIDEBAR (ONLY TWO SPECIFIC CONTROLS) ---
 with st.sidebar:
-    st.title("📂 Dataset Info")
-    if df is not None:
-        st.write(f"**Rows:** {len(df)}")
-        st.write(f"**Range:** {df.index.min().date()} → {df.index.max().date()}")
-        st.write(f"**ETFs:** GLD, SLV, VNQ, TLT, TBT")
-        st.checkbox("T-bill (FRED) Active", value=True, disabled=True)
+    st.title("⚙️ Model Parameters")
+    
+    # Training period slider: 3m to 18m only
+    training_months = st.select_slider(
+        "Model Training Period (Months)",
+        options=[3, 6, 9, 12, 15, 18],
+        value=9
+    )
+    training_days = training_months * 21 # Converting months to trading days
     
     st.divider()
-    st.title("⚙️ Configuration")
-    analysis_year = st.slider("Select Analysis Year", 2008, 2026, 2026)
     
-    # Selection of lookback in months as per your requested UI
-    lookback_months = st.slider("Momentum Lookback (Months)", 3, 18, 9)
-    lookback_days = lookback_months * 21 
+    # Transaction cost slider: 10-50bps in 5bps steps
+    t_costs_bps = st.slider("Transaction Cost (bps)", 10, 50, 10, 5)
+    
+    st.divider()
+    if df is not None:
+        st.caption(f"Data Source: 2008 → {df.index.max().date()}")
 
 # --- 3. MAIN DASHBOARD ---
 if df is not None:
     st.title("📈 P2-ETF Forecaster")
     
-    # Status Banner
-    st.warning(f"⚠️ Latest data: {df.index.max().date()}. Expected {datetime.now().date()}.")
-
-    # A. CORE LOGIC: VOLUME-ADJUSTED MOMENTUM
+    # Core Universe
     universe = ['GLD', 'SLV', 'VNQ', 'TLT', 'TBT']
-    all_closes = df.xs('Close', axis=1, level=1)[universe]
-    all_volumes = df.xs('Volume', axis=1, level=1)[universe]
+    prices = df.xs('Close', axis=1, level=1)[universe]
+    volumes = df.xs('Volume', axis=1, level=1)[universe]
     
-    effective_lookback = min(lookback_days, len(all_closes) - 1)
+    # A. TRAINING LOGIC (Strict Lookback)
+    # Model only "sees" the training_days window to generate the signal
+    training_prices = prices.tail(training_days + 1)
+    training_volumes = volumes.tail(training_days + 1)
     
-    if effective_lookback > 0:
-        # 1. Calculate Price Momentum (Total Return over lookback)
-        price_momentum = (all_closes.iloc[-1] / all_closes.iloc[-(effective_lookback + 1)]) - 1
-        
-        # 2. Calculate Volume Ratio (Today's Vol vs 20-Day Average)
-        # This treats volume as the "fuel" for the momentum signal
-        vol_avg = all_volumes.tail(20).mean()
-        vol_ratio = all_volumes.iloc[-1] / vol_avg
-        
-        # 3. Final Composite Score: Volume-Adjusted Momentum
-        va_momentum = price_momentum * vol_ratio
-        top_ticker = va_momentum.idxmax()
-        
-        st.markdown(f"""
-            <div class="signal-box">
-                🎯 {datetime.now().strftime('%Y-%m-%d')} ➔ {top_ticker}
-                <div style="font-size: 1rem; font-weight: normal; margin-top: 10px;">Next Trading Day Signal (Volume Adjusted)</div>
-            </div>
-            """, unsafe_allow_html=True)
+    # 1. Price Momentum (Total Return over training window)
+    returns = (training_prices.iloc[-1] / training_prices.iloc[0]) - 1
+    
+    # 2. Volume Fuel Filter (Current Vol vs Window Average)
+    vol_filter = training_volumes.iloc[-1] / training_volumes.mean()
+    
+    # 3. Composite Score
+    va_score = returns * vol_filter
+    top_ticker = va_score.idxmax()
 
-        # B. PERFORMANCE METRICS (Full Period)
-        st.subheader("📊 Strategy Performance Metrics")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Ann. Return", f"{(price_momentum[top_ticker]*100):.2f}%", "vs SPY")
-        m2.metric("Sharpe Ratio", "1.53", "Strong")
-        m3.metric("Hit Ratio 15d", "73%", "Good")
-        m4.metric("Max Drawdown", "-37.59%", "Peak to Trough", delta_color="inverse")
-
-        # C. RANKINGS TABLE
-        st.subheader(f"📊 ETF Momentum Rankings — (Lookback: {effective_lookback}d)")
-        rank_df = pd.DataFrame({
-            "ETF": universe,
-            "Price Return": price_momentum,
-            "Volume Ratio": vol_ratio,
-            "VA Score": va_momentum
-        }).sort_values("VA Score", ascending=False)
-        
-        st.dataframe(rank_df.style.format({
-            "Price Return": "{:.2%}", 
-            "Volume Ratio": "{:.2f}x", 
-            "VA Score": "{:.4f}"
-        }).background_gradient(cmap="Greens"), use_container_width=True)
-
-        # D. AUDIT TRAIL
-        st.subheader("📋 Audit Trail — Last 10 Trading Days")
-        # Showing the Signal Ticker's recent activity for verification
-        audit_trail = pd.DataFrame(index=all_closes.tail(10).index)
-        audit_trail['Signal'] = top_ticker
-        audit_trail['Close'] = all_closes[top_ticker].tail(10)
-        audit_trail['Volume'] = all_volumes[top_ticker].tail(10)
-        st.table(audit_trail.style.format({"Close": "{:.2f}", "Volume": "{:,.0f}"}))
-
-    # E. METHODOLOGY
+    # B. SIGNAL BANNER
     st.markdown(f"""
-        <div class="methodology-box">
-            <h4>📖 Methodology</h4>
-            <p>Cross-sectional momentum rotation focusing on <b>{universe}</b>. 
-            The model selects the ETF with the highest <b>Volume-Adjusted Momentum</b> score, where 
-            price performance is validated by relative trading activity (current volume vs. 20-day average).</p>
+        <div class="signal-banner">
+            <div style="text-transform: uppercase; font-size: 0.9rem; letter-spacing: 2px;">Next Trading Day Signal</div>
+            <div class="signal-text">{datetime.now().date()} ➔ {top_ticker}</div>
+            <div style="font-size: 1rem; opacity: 0.8;">Training Period: {training_months} Months • Fee: {t_costs_bps} bps</div>
         </div>
         """, unsafe_allow_html=True)
+
+    # C. PERFORMANCE RANKINGS
+    st.subheader(f"📊 {training_months}M Momentum Training Matrix")
+    rank_df = pd.DataFrame({
+        "ETF": universe,
+        "Period Return": returns,
+        "Volume Fuel": vol_filter,
+        "VA Score": va_score
+    }).sort_values("VA Score", ascending=False)
+    
+    # Professional styling for table
+    st.dataframe(rank_df.style.format({
+        "Period Return": "{:.2%}", "Volume Fuel": "{:.2f}x", "VA Score": "{:.4f}"
+    }), use_container_width=True)
+
+    # D. AUDIT TRAIL
+    st.subheader("📋 Audit Trail (Last 15 Trading Days)")
+    st.table(prices[top_ticker].tail(15).to_frame(name="Signal Price"))
+
 else:
-    st.error("Failed to connect to GitLab vault.")
+    st.error("Vault empty. Check GitLab.")
