@@ -321,14 +321,13 @@ try:
     # ------------------------------------------------------------
     @st.fragment
     def update_dashboard():
-        with st.spinner("Running backtest..."):
-            strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
-                prices[universe], volumes[universe], cash_daily_yields,
-                daily_returns[universe], daily_returns['SPY'], daily_returns['AGG'],
-                rolling_vol, sma_200,
-                training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-                use_vol_filter, use_ma_filter, vol_threshold
-            )
+        strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
+            prices[universe], volumes[universe], cash_daily_yields,
+            daily_returns[universe], daily_returns['SPY'], daily_returns['AGG'],
+            rolling_vol, sma_200,
+            training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
+            use_vol_filter, use_ma_filter, vol_threshold
+        )
 
         bm = benchmark_metrics(daily_returns['SPY'], daily_returns['AGG'], cash_daily_yields)
         spy_ann, spy_sharpe = bm['SPY']
@@ -439,7 +438,7 @@ try:
             spy_series = daily_returns['SPY'].loc[strat_df.index].copy()
             agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
             fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
-            st.pyplot(fig, clear_figure=True)
+            st.pyplot(fig, clear_figure=False)
 
     # ------------------------------------------------------------
     # CALL THE FRAGMENT
