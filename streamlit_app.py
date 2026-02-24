@@ -497,6 +497,76 @@ try:
                     unsafe_allow_html=True
                 )
 
+                # ── Hold Period Analysis (hidden when CASH) ───────────────
+                if curr_sig != "CASH" and not strat_df.empty:
+                    st.subheader(f"⏱ Optimal Hold Period Analysis — {curr_sig}")
+
+                    # Find all historical dates where model picked curr_sig
+                    asset_dates = strat_df[strat_df['Signal'] == curr_sig].index
+                    asset_prices = prices[curr_sig]
+
+                    rows = []
+                    for hold_days, label in [(1, "1 Day"), (3, "3 Days"), (5, "5 Days")]:
+                        gross_rets = []
+                        for dt in asset_dates:
+                            loc = prices.index.get_loc(dt)
+                            end_loc = loc + hold_days
+                            if end_loc < len(prices):
+                                g = asset_prices.iloc[end_loc] / asset_prices.iloc[loc] - 1
+                                gross_rets.append(g)
+
+                        if len(gross_rets) == 0:
+                            continue
+
+                        gross_arr  = np.array(gross_rets)
+                        net_arr    = gross_arr - 2 * t_cost_pct   # entry + exit cost
+                        avg_net    = net_arr.mean()
+                        win_rate   = (net_arr > 0).mean()
+                        # Annualise: (1 + avg_net_per_period)^(252/hold_days) - 1
+                        ann        = (1 + avg_net) ** (252 / hold_days) - 1
+                        n_obs      = len(gross_rets)
+
+                        rows.append({
+                            "Hold":        label,
+                            "Avg Net Ret": avg_net,
+                            "Annualised":  ann,
+                            "Win Rate":    win_rate,
+                            "# Signals":   n_obs
+                        })
+
+                    if rows:
+                        hold_df = pd.DataFrame(rows)
+                        best_idx = hold_df["Annualised"].idxmax()
+                        hold_df["Best"] = hold_df.index.map(
+                            lambda i: "⭐ Best" if i == best_idx else ""
+                        )
+                        st.dataframe(
+                            hold_df.style.format({
+                                "Avg Net Ret": "{:.3%}",
+                                "Annualised":  "{:.1%}",
+                                "Win Rate":    "{:.0%}",
+                                "# Signals":   "{:.0f}"
+                            }),
+                            use_container_width=True,
+                            key="hold_period_table"
+                        )
+                        best_row = hold_df.loc[best_idx]
+                        st.caption(
+                            f"Based on {int(best_row['# Signals'])} historical {curr_sig} signals "
+                            f"under current parameter settings. Net of 2× transaction cost "
+                            f"({t_costs_bps}bps in + {t_costs_bps}bps out)."
+                        )
+                        st.warning(
+                            "⚠️ **Disclaimer:** Hold period returns shown are historical averages "
+                            "based on past signals under the current parameter settings. "
+                            "Annualised figures compound short-period averages and will appear "
+                            "elevated — they do not represent achievable annual returns. "
+                            "Past performance is not indicative of future results. "
+                            "This analysis is informational only and does not constitute "
+                            "investment advice. Always follow the live model signal on the day.",
+                            icon=None
+                        )
+
                 fast_days_display = max(5, training_days // 3)
                 st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix  ·  Accel window: {fast_days_display}d")
                 rank_df = pd.DataFrame({
