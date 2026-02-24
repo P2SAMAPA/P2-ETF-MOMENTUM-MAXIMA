@@ -5,32 +5,35 @@ import os
 from datetime import datetime
 
 def fetch_data():
-    # 1. Define Universe
+    # 1. Define Universe (Core ETFs + Benchmarks)
     tickers = ['TLT', 'TBT', 'VNQ', 'SLV', 'GLD', 'SPY', 'AGG']
     all_data = []
 
     for ticker in tickers:
         print(f"Fetching {ticker}...")
-        # Start from 2007 to ensure the 18-month lookback works for the 2008 start
+        # Start from 2007 to ensure lookback padding for the 2008-2026 model
         df = yf.download(ticker, start="2007-01-01", progress=False, auto_adjust=True)
         
         if not df.empty:
+            # Flatten columns if yfinance returns a MultiIndex
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
+            # Explicitly capture Close and Volume for the Momentum Engine
             temp = df[['Close', 'Volume']].copy()
-            # Ensure we have the raw Return for the Z-Score engine
             temp['Return'] = temp['Close'].pct_change()
             
+            # Structure as Multi-Index (Ticker, Metric)
             temp.columns = pd.MultiIndex.from_product([[ticker], temp.columns])
             all_data.append(temp)
 
-    # 2. Fetch FRED 3-Month T-Bill (The Hurdle Rate)
+    # 2. Fetch FRED 3-Month T-Bill (The Absolute Momentum Hurdle)
     print("Fetching 3-Month T-Bill from FRED...")
     try:
         rf_data = web.DataReader('DTB3', 'fred', start="2007-01-01")
         rf_data.columns = pd.MultiIndex.from_product([['CASH'], ['Rate']])
-        # Daily RF used for the Absolute Momentum Filter
+        
+        # Convert % rate to daily decimal for cost-adjusted optimization
         rf_data[('CASH', 'Daily_Rf')] = (rf_data[('CASH', 'Rate')] / 100) / 252
         all_data.append(rf_data)
     except Exception as e:
@@ -38,15 +41,16 @@ def fetch_data():
 
     # 3. Combine and Save
     if all_data:
-        # We join on the index of the price data to prevent dropping recent days
+        # Join dataframes along the date index
         final_df = pd.concat(all_data, axis=1)
         
-        # FIX: Forward fill the CASH rate so it doesn't kill the latest price rows
+        # RECTIFICATION: Forward fill T-Bill rates to align with latest prices
         final_df = final_df.ffill()
         
-        # Only drop rows where we have NO price data at all
+        # Only drop rows where ETF price data is missing (preserving the latest days)
         final_df = final_df.dropna(subset=[(t, 'Close') for t in tickers], how='all')
 
+        # Save to Parquet for Streamlit consumption
         final_df.to_parquet('etf_momentum_data.parquet')
         print(f"✅ Pipeline Complete: Dataset ends at {final_df.index.max().date()}")
     else:
