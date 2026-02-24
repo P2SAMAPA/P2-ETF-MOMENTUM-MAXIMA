@@ -56,6 +56,9 @@ try:
             content = resp.content
             if content[:4] != b'PAR1':
                 st.error("❌ File is not a valid Parquet file.")
+                st.write(f"**Status code:** {resp.status_code}")
+                st.write(f"**Content-Type:** {resp.headers.get('Content-Type', 'unknown')}")
+                st.write(f"**First 300 bytes (raw):** `{content[:300]}`")
                 return None
 
             return pd.read_parquet(BytesIO(content))
