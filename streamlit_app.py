@@ -155,7 +155,7 @@ try:
     sma_200 = compute_sma(prices[universe])
 
     # ------------------------------------------------------------
-    # CORE SIGNAL FUNCTION (fixed NaN handling)
+    # CORE SIGNAL FUNCTION (fixed ranking: higher values get higher ranks)
     # ------------------------------------------------------------
     def calculate_metrics_for_date(target_idx):
         actual_days = min(training_days, target_idx)
@@ -171,11 +171,11 @@ try:
         zs = (rets - rets.mean()) / (rets.std() + 1e-6)
         v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
 
-        # Compute ranks (1 = best, 5 = worst) – fill NaN with 0 to avoid conversion errors
-        ret_rank = rets.rank(method='min', ascending=False).fillna(0).astype(int)
-        z_rank = zs.rank(method='min', ascending=False).fillna(0).astype(int)
-        v_rank = v_fuel.rank(method='min', ascending=False).fillna(0).astype(int)
-        rank_sum = ret_rank + z_rank + v_rank  # max 15, min 0 (if all ranks are 0, unlikely)
+        # Compute ranks (5 = best, 1 = worst) – using ascending=True gives smallest value rank 1, so best gets rank 5.
+        ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
+        z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
+        v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
+        rank_sum = ret_rank + z_rank + v_rank  # max 15, min 3 (if all ranks are 1)
 
         # Apply filters
         valid_assets = universe.copy()
@@ -329,7 +329,7 @@ try:
             unsafe_allow_html=True
         )
 
-        # Ranking matrix (now includes Rank Sum)
+        # Ranking matrix (now with Rank Sum where higher is better)
         st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
         rank_df = pd.DataFrame({
             "ETF": universe,
@@ -379,7 +379,7 @@ try:
             st.pyplot(fig, clear_figure=True)
 
     # ------------------------------------------------------------
-    # CALL THE FRAGMENT – this is where the dynamic UI is built
+    # CALL THE FRAGMENT
     # ------------------------------------------------------------
     update_dashboard()
 
