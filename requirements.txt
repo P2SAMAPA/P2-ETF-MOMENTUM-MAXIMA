@@ -1,10 +1,9 @@
 streamlit
 pandas
-plotly
+numpy
 python-gitlab
 pyarrow
 fastparquet
 yfinance
 pandas-datareader
-matplotlib
 pandas_market_calendars
