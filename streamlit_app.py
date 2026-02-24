@@ -119,11 +119,21 @@ try:
         st.divider()
         st.subheader("📊 Additional Filters")
         use_vol_filter = st.checkbox(
-            "Volatility filter (20d annualized < 40%)",
+            "Volatility filter",
             value=True,
             key="vol_filter",
-            help="Excludes assets with 20‑day annualized volatility above 40% (typical high‑vol cutoff)."
+            help="Excludes assets with 20‑day annualized volatility above the selected threshold."
         )
+        # Volatility threshold slider (only enabled if checkbox is checked)
+        vol_threshold = st.slider(
+            "Max annualized volatility",
+            min_value=0.20, max_value=0.50, value=0.40, step=0.05,
+            format="%.0f%%",
+            disabled=not use_vol_filter,
+            key="vol_threshold",
+            help="Assets with 20‑day annualized volatility above this value are excluded when filter is active."
+        )
+
         use_ma_filter = st.checkbox(
             "Moving average filter (price > 200d MA)",
             value=True,
@@ -144,10 +154,9 @@ try:
 
     rolling_vol = compute_rolling_vol(daily_returns[universe])
     sma_200 = compute_sma(prices[universe])
-    VOL_THRESHOLD = 0.4  # fixed 40%
 
     # ------------------------------------------------------------
-    # CORE SIGNAL FUNCTION
+    # CORE SIGNAL FUNCTION (uses outer variables, including vol_threshold)
     # ------------------------------------------------------------
     def calculate_metrics_for_date(target_idx):
         actual_days = min(training_days, target_idx)
@@ -168,7 +177,7 @@ try:
         valid_assets = universe.copy()
         if use_vol_filter:
             current_vol = rolling_vol.iloc[target_idx]
-            valid_assets = [a for a in valid_assets if current_vol[a] <= VOL_THRESHOLD]
+            valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
 
         if use_ma_filter:
             current_price = prices.iloc[target_idx][universe]
@@ -186,11 +195,11 @@ try:
         return final_sig, scores, rets, zs, v_fuel
 
     # ------------------------------------------------------------
-    # BACKTEST WITH STOP LOSS (cached)
+    # BACKTEST WITH STOP LOSS (cached, now includes vol_threshold)
     # ------------------------------------------------------------
     @st.cache_data(show_spinner=False)
     def run_backtest_with_stop(training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-                               use_vol_filter, use_ma_filter):
+                               use_vol_filter, use_ma_filter, vol_threshold):
         signals = []
         strat_returns = []
         stop_active = False
@@ -254,10 +263,10 @@ try:
 
         return strat_df, ann_ret, sharpe, max_dd, daily_dd
 
-    # Run backtest
+    # Run backtest (pass vol_threshold)
     strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
         training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-        use_vol_filter, use_ma_filter
+        use_vol_filter, use_ma_filter, vol_threshold
     )
 
     # Benchmark metrics (cached)
