@@ -43,7 +43,7 @@ try:
     # DATA LOADING FROM GITLAB (with enhanced error checking)
     # ------------------------------------------------------------
     import requests
-import urllib.parse
+    import urllib.parse
 
 @st.cache_data(ttl=3600)
 def load_data():
