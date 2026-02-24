@@ -22,6 +22,18 @@ def sync():
         with open(file_path, 'rb') as f:
             file_content = f.read()
 
+        # --- DEBUG: print file info before upload ---
+        print(f"DEBUG: Local file size = {len(file_content)} bytes")
+        print(f"DEBUG: First 50 bytes = {file_content[:50]}")
+        # If pandas is available, you could also try reading it:
+        # import pandas as pd
+        # try:
+        #     df = pd.read_parquet(file_path)
+        #     print("DEBUG: Successfully read as Parquet, shape:", df.shape)
+        # except Exception as e:
+        #     print("DEBUG: Could not read as Parquet:", e)
+        # --------------------------------------------
+
         # Encode content to base64 for GitLab API
         base64_content = base64.b64encode(file_content).decode('utf-8')
 
