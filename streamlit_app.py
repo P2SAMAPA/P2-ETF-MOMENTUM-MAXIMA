@@ -342,13 +342,15 @@ try:
         key="audit_trail"
     )
 
-    # Equity curve (cached)
-    @st.cache_data(ttl=600)
-    def plot_curve():
+    # ------------------------------------------------------------
+    # EQUITY CURVE (cached with st.cache_resource to avoid flicker)
+    # ------------------------------------------------------------
+    @st.cache_resource(ttl=600)
+    def get_equity_curve_fig(strat_series, spy_series, agg_series):
         fig, ax = plt.subplots(figsize=(10, 5))
-        strat_cum = (1 + strat_df['Net_Return']).cumprod() - 1
-        spy_cum = (1 + daily_returns['SPY'].loc[strat_df.index]).cumprod() - 1
-        agg_cum = (1 + daily_returns['AGG'].loc[strat_df.index]).cumprod() - 1
+        strat_cum = (1 + strat_series).cumprod() - 1
+        spy_cum = (1 + spy_series).cumprod() - 1
+        agg_cum = (1 + agg_series).cumprod() - 1
         ax.plot(strat_cum, label='Strategy')
         ax.plot(spy_cum, label='SPY')
         ax.plot(agg_cum, label='AGG')
@@ -360,7 +362,12 @@ try:
 
     if not strat_df.empty:
         st.subheader("📈 Equity Curve")
-        st.pyplot(plot_curve())
+        # Pass copies to avoid referencing the original dataframe (which may change)
+        strat_series = strat_df['Net_Return'].copy()
+        spy_series = daily_returns['SPY'].loc[strat_df.index].copy()
+        agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
+        fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
+        st.pyplot(fig, clear_figure=True)
 
 except Exception as e:
     st.error(f"❌ An unexpected error occurred:\n{traceback.format_exc()}")
