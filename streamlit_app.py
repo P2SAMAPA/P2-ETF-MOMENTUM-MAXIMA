@@ -40,7 +40,7 @@ try:
         """, unsafe_allow_html=True)
 
     # ------------------------------------------------------------
-    # DATA LOADING FROM GITLAB (with enhanced error checking)
+    # DATA LOADING FROM GITLAB (direct API call for reliability)
     # ------------------------------------------------------------
     @st.cache_data(ttl=3600)
     def load_data():
@@ -50,7 +50,6 @@ try:
                 st.error("❌ GITLAB_API_TOKEN environment variable not set.")
                 return None
 
-            # Use raw file URL (more reliable)
             project_path_encoded = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
             file_path_encoded = urllib.parse.quote('etf_momentum_data.parquet', safe='')
             url = f"https://gitlab.com/api/v4/projects/{project_path_encoded}/repository/files/{file_path_encoded}/raw?ref=main"
@@ -64,29 +63,14 @@ try:
                 return None
 
             file_content = response.content
-            st.write(f"📄 Downloaded {len(file_content)} bytes, first 20 bytes: {file_content[:20]}")
 
-            # Check magic bytes
+            # Check magic bytes (Parquet starts with b'PAR1')
             if file_content[:4] != b'PAR1':
                 st.error("❌ File does not start with PAR1 – not a valid Parquet file.")
                 return None
 
-            # Try reading with pandas
-            try:
-                df = pd.read_parquet(BytesIO(file_content))
-                st.success(f"✅ Data loaded successfully. Shape: {df.shape}")
-                return df
-            except Exception as e:
-                st.error(f"❌ pandas.read_parquet failed: {e}")
-                import pyarrow.parquet as pq
-                try:
-                    table = pq.read_table(BytesIO(file_content))
-                    st.write("✅ pyarrow could read the file. Converting to pandas...")
-                    df = table.to_pandas()
-                    return df
-                except Exception as e2:
-                    st.error(f"❌ pyarrow also failed: {e2}")
-                    return None
+            df = pd.read_parquet(BytesIO(file_content))
+            return df
 
         except Exception as e:
             st.error(f"⚠️ Connection Error in load_data: {e}")
@@ -106,7 +90,6 @@ try:
 
     # --- 3. MAIN DASHBOARD ---
     if df is not None:
-        # Standardize data alignment
         df = df.sort_index().ffill()
 
         st.info(f"📁 Dataset updated till: **{df.index.max().date()}**")
@@ -164,12 +147,24 @@ try:
                 return pd.DataFrame(), 0, 0, 0, 0
 
             strat_df = pd.DataFrame(signals).set_index('Date')
-            cum_ret = np.cumprod(1 + np.array(strat_returns)) - 1
-            ann_ret = (np.prod(1 + np.array(strat_returns)) ** (252 / len(strat_returns))) - 1
-            rf_mean = cash_daily_yields.mean() * 252  # Annualized Rf
+            strat_returns = np.array(strat_returns)
+            cum_ret = np.cumprod(1 + strat_returns) - 1  # decimal form
+
+            # Annualized return
+            ann_ret = (np.prod(1 + strat_returns) ** (252 / len(strat_returns))) - 1
+
+            # Sharpe ratio
+            rf_mean = cash_daily_yields.mean() * 252
             sharpe = (ann_ret - rf_mean) / (np.std(strat_returns) * np.sqrt(252)) if np.std(strat_returns) > 0 else 0
-            max_dd = np.min(cum_ret - np.maximum.accumulate(cum_ret)) if len(cum_ret) > 0 else 0
-            daily_dd = np.min(strat_returns) if len(strat_returns) > 0 else 0
+
+            # Maximum drawdown (percentage)
+            wealth = 1 + cum_ret
+            peak_wealth = np.maximum.accumulate(wealth)
+            drawdown_pct = (wealth - peak_wealth) / peak_wealth
+            max_dd = np.min(drawdown_pct)  # already in decimal (e.g., -0.25 for 25% drawdown)
+
+            # Daily max drawdown (simple min of daily returns)
+            daily_dd = np.min(strat_returns)
 
             return strat_df, ann_ret, sharpe, max_dd, daily_dd
 
@@ -192,14 +187,15 @@ try:
 
         curr_sig, final_scores, final_rets, final_zs, final_vols = calculate_metrics_for_date(len(df) - 1)
 
-        # Holiday-aware date projection (robust for 2026, but generalized)
-        holidays_2026 = ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
+        # Holiday-aware date projection
+        holidays_2026 = ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+                         "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
 
         def get_next_trading_day(base_date):
             next_day = base_date + timedelta(days=1)
             while next_day.weekday() >= 5 or next_day.strftime('%Y-%m-%d') in holidays_2026:
                 next_day += timedelta(days=1)
-            return next_day   # ✅ just return the date object
+            return next_day  # already a date object
 
         display_date = get_next_trading_day(df.index.max().date())
 
@@ -211,7 +207,7 @@ try:
         col2.metric("Strat Sharpe", f"{sharpe:.2f}")
         col2.metric("SPY Sharpe", f"{spy_sharpe:.2f}")
         col2.metric("AGG Sharpe", f"{agg_sharpe:.2f}")
-        col3.metric("Max DD (P-T)", f"{max_dd:.1%}")
+        col3.metric("Max DD (P-T)", f"{max_dd:.1%}")   # max_dd is decimal
         col4.metric("Max DD (Daily)", f"{daily_dd:.1%}")
         col5.metric("Hit Ratio (15d)", f"{hit_ratio:.0%}")
 
@@ -220,30 +216,34 @@ try:
 
         st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
         rank_df = pd.DataFrame({"ETF": universe, "Return": final_rets, "Z-Score": final_zs, "Vol Fuel": final_vols, "Score": final_scores}).sort_values("Score", ascending=False)
-        # Fixed deprecated parameter: use_container_width → width='stretch'
         st.dataframe(rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Score": "{:.4f}"}), width='stretch')
 
         st.subheader("📋 Audit Trail (Last 15 Trading Days)")
 
         def color_rets(val):
             return f'color: {"#00d1b2" if val > 0 else "#ff4b4b"}'
-        # Fixed deprecated applymap → map
         st.table(audit_df.style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"}))
 
-        # Equity Curve Chart
-        if not strat_df.empty:
-            st.subheader("📈 Equity Curve")
-            strat_cum_ret = (1 + strat_df['Net_Return']).cumprod() - 1
-            spy_cum_ret = (1 + daily_returns['SPY'].loc[strat_df.index]).cumprod() - 1
-            agg_cum_ret = (1 + daily_returns['AGG'].loc[strat_df.index]).cumprod() - 1
-
+        # Equity Curve Chart (cached to reduce flicker)
+        @st.cache_data(ttl=600)
+        def plot_equity_curve(strat_df, spy_returns, agg_returns):
             fig, ax = plt.subplots(figsize=(10, 5))
+            strat_cum_ret = (1 + strat_df['Net_Return']).cumprod() - 1
+            spy_cum_ret = (1 + spy_returns.loc[strat_df.index]).cumprod() - 1
+            agg_cum_ret = (1 + agg_returns.loc[strat_df.index]).cumprod() - 1
+
             ax.plot(strat_cum_ret, label='Strategy')
             ax.plot(spy_cum_ret, label='SPY')
             ax.plot(agg_cum_ret, label='AGG')
             ax.legend()
             ax.set_title('Cumulative Returns')
             ax.set_ylabel('Return')
+            ax.grid(True, alpha=0.3)
+            return fig
+
+        if not strat_df.empty:
+            st.subheader("📈 Equity Curve")
+            fig = plot_equity_curve(strat_df, daily_returns['SPY'], daily_returns['AGG'])
             st.pyplot(fig)
 
     else:
