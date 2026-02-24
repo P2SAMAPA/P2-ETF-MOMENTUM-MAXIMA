@@ -79,15 +79,17 @@ try:
     cash_daily_yields = df[('CASH', 'Daily_Rf')]
 
     # ------------------------------------------------------------
-    # SIDEBAR CONTROLS
+    # SIDEBAR CONTROLS (with keys to preserve state)
     # ------------------------------------------------------------
     with st.sidebar:
         st.title("⚙️ Model Parameters")
-        training_months = st.select_slider("Training Period (Months)", options=[3,6,9,12,15,18], value=9)
+        training_months = st.select_slider(
+            "Training Period (Months)", options=[3,6,9,12,15,18], value=9, key="training_months"
+        )
         training_days = int(training_months * 21)
 
         st.divider()
-        t_costs_bps = st.slider("Transaction Cost (bps)", 10, 50, 10, 5)
+        t_costs_bps = st.slider("Transaction Cost (bps)", 10, 50, 10, 5, key="tcost")
         t_cost_pct = t_costs_bps / 10000
 
         st.divider()
@@ -97,29 +99,27 @@ try:
 
         st.divider()
         st.subheader("📊 Additional Filters")
-        use_vol_filter = st.checkbox("Volatility filter (20d annualized < threshold)", value=True)
-        vol_threshold = st.slider("Max annualized volatility", 0.1, 1.0, 0.4, 0.05, format="%.0f%%", disabled=not use_vol_filter)
-
-        use_ma_filter = st.checkbox("Moving average filter (price > 200d MA)", value=True)
+        # Checkboxes only – threshold fixed at 40%
+        use_vol_filter = st.checkbox("Volatility filter (20d annualized < 40%)", value=True, key="vol_filter")
+        use_ma_filter = st.checkbox("Moving average filter (price > 200d MA)", value=True, key="ma_filter")
 
     # ------------------------------------------------------------
     # HELPER FUNCTIONS (cached)
     # ------------------------------------------------------------
     @st.cache_data
     def compute_rolling_vol(returns, window=20):
-        """Annualized volatility (std * sqrt(252))"""
         return returns.rolling(window).std() * np.sqrt(252)
 
     @st.cache_data
     def compute_sma(prices, window=200):
         return prices.rolling(window).mean()
 
-    # Precompute rolling metrics for all assets (to avoid recomputing in loop)
     rolling_vol = compute_rolling_vol(daily_returns[universe])
     sma_200 = compute_sma(prices[universe])
+    VOL_THRESHOLD = 0.4  # fixed 40%
 
     # ------------------------------------------------------------
-    # CORE SIGNAL FUNCTION (with filters)
+    # CORE SIGNAL FUNCTION
     # ------------------------------------------------------------
     def calculate_metrics_for_date(target_idx):
         actual_days = min(training_days, target_idx)
@@ -136,27 +136,22 @@ try:
         v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
         scores = zs + rets + v_fuel
 
-        # Apply filters (if enabled)
+        # Apply filters
         valid_assets = universe.copy()
         if use_vol_filter:
-            # Current volatility (latest value in window) must be below threshold
             current_vol = rolling_vol.iloc[target_idx]
-            valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
+            valid_assets = [a for a in valid_assets if current_vol[a] <= VOL_THRESHOLD]
 
         if use_ma_filter:
             current_price = prices.iloc[target_idx][universe]
             current_sma = sma_200.iloc[target_idx]
             valid_assets = [a for a in valid_assets if current_price[a] > current_sma[a]]
 
-        # If no assets survive filters, go to CASH
         if not valid_assets:
             return "CASH", scores, rets, zs, v_fuel
 
-        # Find top asset among valid ones
         valid_scores = scores[valid_assets]
         top_asset = valid_scores.idxmax()
-
-        # Absolute momentum hurdle
         rf_hurdle = np.prod(1 + window_daily_rf) - 1
         final_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
 
@@ -167,7 +162,7 @@ try:
     # ------------------------------------------------------------
     @st.cache_data(show_spinner=False)
     def run_backtest_with_stop(training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-                               use_vol_filter, vol_threshold, use_ma_filter):
+                               use_vol_filter, use_ma_filter):
         signals = []
         strat_returns = []
         stop_active = False
@@ -178,7 +173,7 @@ try:
             model_sig, scores, rets, zs, _ = calculate_metrics_for_date(i)
             max_z = zs.max()
 
-            # Stop logic (unchanged)
+            # Stop logic
             if stop_active:
                 if max_z > z_exit_threshold:
                     stop_active = False
@@ -231,10 +226,10 @@ try:
 
         return strat_df, ann_ret, sharpe, max_dd, daily_dd
 
-    # Run backtest (cached)
+    # Run backtest
     strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
         training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-        use_vol_filter, vol_threshold, use_ma_filter
+        use_vol_filter, use_ma_filter
     )
 
     # Benchmark metrics (cached)
@@ -279,7 +274,12 @@ try:
     col5.metric("Hit Ratio (15d)", f"{hit_ratio:.0%}")
 
     bg = "#00d1b2" if curr_sig != "CASH" else "#ff4b4b"
-    st.markdown(f'<div class="signal-banner" style="background-color:{bg};"><div style="text-transform:uppercase;">Next Session: {display_date}</div><div class="signal-text">{curr_sig}</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="signal-banner" style="background-color:{bg};">'
+        f'<div style="text-transform:uppercase;">Next Session: {display_date}</div>'
+        f'<div class="signal-text">{curr_sig}</div></div>',
+        unsafe_allow_html=True
+    )
 
     st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
     rank_df = pd.DataFrame({
@@ -289,11 +289,14 @@ try:
         "Vol Fuel": final_vols,
         "Score": final_scores
     }).sort_values("Score", ascending=False)
-    st.dataframe(rank_df.style.format({"Return":"{:.2%}","Z-Score":"{:.2f}","Vol Fuel":"{:.2f}x","Score":"{:.4f}"}), width='stretch')
+    st.dataframe(
+        rank_df.style.format({"Return":"{:.2%}","Z-Score":"{:.2f}","Vol Fuel":"{:.2f}x","Score":"{:.4f}"}),
+        width='stretch',
+        key="rank_matrix"
+    )
 
     st.subheader("📋 Audit Trail (Last 15 Trading Days)")
     def color_rets(v): return f'color: {"#00d1b2" if v>0 else "#ff4b4b"}'
-    # Use dataframe with key to reduce flicker
     st.dataframe(
         audit_df[['Signal','Net_Return']].style.map(color_rets, subset=['Net_Return']).format({"Net_Return":"{:.2%}"}),
         use_container_width=True,
