@@ -42,14 +42,12 @@ try:
     # ------------------------------------------------------------
     # DATA LOADING FROM GITLAB (with enhanced error checking)
     # ------------------------------------------------------------
-    import requests
-    import urllib.parse
-
+  
     @st.cache_data(ttl=3600)
     def load_data():
-    try:
-        token = os.getenv('GITLAB_API_TOKEN')
-        if token is None:
+        try:
+            token = os.getenv('GITLAB_API_TOKEN')
+            if token is None:
             st.error("❌ GITLAB_API_TOKEN environment variable not set.")
             return None
 
@@ -61,7 +59,7 @@ try:
         headers = {"PRIVATE-TOKEN": token}
         response = requests.get(url, headers=headers, timeout=30)
         
-        if response.status_code != 200:
+            if response.status_code != 200:
             st.error(f"❌ GitLab API error: {response.status_code}")
             st.text(response.text[:500])
             return None
@@ -70,16 +68,16 @@ try:
         st.write(f"📄 Downloaded {len(file_content)} bytes, first 20 bytes: {file_content[:20]}")
 
         # Check magic bytes
-        if file_content[:4] != b'PAR1':
+            if file_content[:4] != b'PAR1':
             st.error("❌ File does not start with PAR1 – not a valid Parquet file.")
             return None
 
         # Try reading with pandas
-        try:
+            try:
             df = pd.read_parquet(BytesIO(file_content))
             st.success(f"✅ Data loaded successfully. Shape: {df.shape}")
             return df
-        except Exception as e:
+            except Exception as e:
             st.error(f"❌ pandas.read_parquet failed: {e}")
             # Attempt to read with pyarrow directly for more info
             import pyarrow.parquet as pq
