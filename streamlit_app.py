@@ -103,24 +103,33 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
     universe = list(prices_universe.columns)
     n = len(prices_universe)
 
+    # Fast window = 1/3 of training period, minimum 5 days
+    fast_days = max(5, training_days // 3)
+
     # ------------------------------------------------------------------
     # VECTORISED SIGNAL COMPUTATION
-    # Instead of looping row-by-row, compute all rolling windows at once
-    # using numpy stride tricks — this runs in milliseconds vs minutes.
     # ------------------------------------------------------------------
 
-    # Rolling window returns: price[t] / price[t - training_days] - 1
     price_arr = prices_universe.values.astype(float)       # (n, 5)
     vol_arr   = volumes_universe.values.astype(float)      # (n, 5)
 
-    # Lookback-period returns for every row
-    lookback = np.full(n, training_days, dtype=int)
-    lookback = np.minimum(lookback, np.arange(n))          # can't look back before row 0
-    start_rows = np.arange(n) - lookback
-    start_rows = np.maximum(start_rows, 0)
+    # --- Slow window (training period) start rows ---
+    lookback   = np.minimum(np.full(n, training_days, dtype=int), np.arange(n))
+    start_rows = np.maximum(np.arange(n) - lookback, 0)
 
-    # rets[i, j] = price[i,j] / price[start_rows[i], j] - 1
+    # --- Fast window (1/3 training period) start rows ---
+    fast_lookback   = np.minimum(np.full(n, fast_days, dtype=int), np.arange(n))
+    fast_start_rows = np.maximum(np.arange(n) - fast_lookback, 0)
+
+    # Slow returns: price[t] / price[t - training_days] - 1
     rets_mat = price_arr / price_arr[start_rows] - 1       # (n, 5)
+
+    # Fast returns: price[t] / price[t - fast_days] - 1
+    fast_rets_mat = price_arr / price_arr[fast_start_rows] - 1  # (n, 5)
+
+    # Momentum acceleration: fast return minus slow return
+    # Positive = momentum speeding up, negative = fading
+    accel_mat = fast_rets_mat - rets_mat                   # (n, 5)
 
     # Z-scores across assets at each row
     rets_mean = rets_mat.mean(axis=1, keepdims=True)
@@ -128,27 +137,32 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
     zs_mat    = (rets_mat - rets_mean) / rets_std          # (n, 5)
 
     # Volume fuel: last vol / mean of prior window vols
-    # Use rolling mean shifted by 1 to exclude current row
-    vol_df       = pd.DataFrame(vol_arr, index=prices_universe.index, columns=universe)
+    vol_df        = pd.DataFrame(vol_arr, index=prices_universe.index, columns=universe)
     vol_roll_mean = vol_df.shift(1).rolling(training_days, min_periods=1).mean()
-    vfuel_mat    = vol_arr / (vol_roll_mean.values + 1e-9)  # (n, 5)
+    vfuel_mat     = vol_arr / (vol_roll_mean.values + 1e-9)  # (n, 5)
 
     # Ranks across assets (1=worst, 5=best) at each row
     def row_rank(mat):
-        # scipy-free ordinal rank using argsort twice
-        temp = mat.argsort(axis=1)
+        temp  = mat.argsort(axis=1)
         ranks = np.empty_like(temp)
         rows  = np.arange(mat.shape[0])[:, None]
         ranks[rows, temp] = np.arange(mat.shape[1])
         return ranks + 1  # 1-indexed
 
-    ret_rank_mat = row_rank(rets_mat)   # (n, 5)
-    z_rank_mat   = row_rank(zs_mat)     # (n, 5)
-    v_rank_mat   = row_rank(vfuel_mat)  # (n, 5)
-    rank_sum_mat = ret_rank_mat + z_rank_mat + v_rank_mat  # (n, 5)  max=15
+    ret_rank_mat   = row_rank(rets_mat)    # (n, 5)  max 5
+    z_rank_mat     = row_rank(zs_mat)      # (n, 5)  max 5
+    accel_rank_mat = row_rank(accel_mat)   # (n, 5)  max 5
+
+    # Conditional volume rank: rank 1-5 only if vfuel > 1.0, else 0
+    vol_rank_mat = row_rank(vfuel_mat).astype(float)       # (n, 5)
+    vol_rank_mat[vfuel_mat <= 1.0] = 0.0                   # no confirmation = 0
+
+    # Total rank sum: max = 5+5+5+5 = 20
+    rank_sum_mat = (ret_rank_mat + z_rank_mat +
+                    accel_rank_mat + vol_rank_mat)          # (n, 5)  max=20
 
     # Max z-score per row (used for stop-loss exit)
-    max_z_arr = zs_mat.max(axis=1)      # (n,)
+    max_z_arr = zs_mat.max(axis=1)                         # (n,)
 
     # Rolling RF hurdle: cumulative cash yield over training window
     # Use log-sum approximation for speed: sum(log(1+rf)) ≈ log(prod(1+rf))
@@ -401,20 +415,32 @@ try:
             # Current signal (lightweight recompute for the last row only)
             last_idx = len(prices) - 1
             actual_days = min(training_days, last_idx)
-            start_idx = last_idx - actual_days
-            window_prices = prices[universe].iloc[start_idx: last_idx + 1]
-            window_vols = volumes[universe].iloc[start_idx: last_idx + 1]
-            window_daily_rf = cash_daily_yields.iloc[start_idx: last_idx + 1]
+            fast_days   = max(5, actual_days // 3)
+            start_idx      = last_idx - actual_days
+            fast_start_idx = last_idx - min(fast_days, last_idx)
 
-            rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
-            zs = (rets - rets.mean()) / (rets.std() + 1e-6)
-            v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
+            window_prices      = prices[universe].iloc[start_idx: last_idx + 1]
+            fast_window_prices = prices[universe].iloc[fast_start_idx: last_idx + 1]
+            window_vols        = volumes[universe].iloc[start_idx: last_idx + 1]
+            window_daily_rf    = cash_daily_yields.iloc[start_idx: last_idx + 1]
 
-            ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
-            z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
-            v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
-            rank_sum = ret_rank + z_rank + v_rank
-            final_rets, final_zs, final_vols = rets, zs, v_fuel
+            rets      = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
+            fast_rets = (fast_window_prices.iloc[-1] / fast_window_prices.iloc[0]) - 1
+            accel     = fast_rets - rets
+            zs        = (rets - rets.mean()) / (rets.std() + 1e-6)
+            v_fuel    = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
+
+            ret_rank   = rets.rank(method='min', ascending=True).fillna(0).astype(int)
+            z_rank     = zs.rank(method='min', ascending=True).fillna(0).astype(int)
+            accel_rank = accel.rank(method='min', ascending=True).fillna(0).astype(int)
+
+            # Conditional volume rank: 1-5 only if vfuel > 1.0, else 0
+            vol_rank_raw = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
+            vol_rank     = vol_rank_raw.where(v_fuel > 1.0, 0)
+
+            rank_sum = ret_rank + z_rank + accel_rank + vol_rank
+            final_rets, final_zs, final_vols, final_accel = rets, zs, v_fuel, accel
+            final_ret_rank, final_z_rank, final_accel_rank, final_vol_rank = ret_rank, z_rank, accel_rank, vol_rank
 
             valid_assets = universe.copy()
             if use_vol_filter:
@@ -471,17 +497,33 @@ try:
                     unsafe_allow_html=True
                 )
 
-                st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
+                fast_days_display = max(5, training_days // 3)
+                st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix  ·  Accel window: {fast_days_display}d")
                 rank_df = pd.DataFrame({
-                    "ETF": universe,
-                    "Return": final_rets,
-                    "Z-Score": final_zs,
-                    "Vol Fuel": final_vols,
-                    "Rank Sum": rank_sum
+                    "ETF":        universe,
+                    "Return":     final_rets,
+                    "Ret Rank":   final_ret_rank,
+                    "Z-Score":    final_zs,
+                    "Z Rank":     final_z_rank,
+                    "Accel":      final_accel,
+                    "Accel Rank": final_accel_rank,
+                    "Vol Fuel":   final_vols,
+                    "Vol Rank":   final_vol_rank,
+                    "Rank Sum":   rank_sum
                 }).sort_values("Rank Sum", ascending=False)
                 st.dataframe(
-                    rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Rank Sum": "{:.0f}"}),
-                    width='stretch',
+                    rank_df.style.format({
+                        "Return":     "{:.2%}",
+                        "Ret Rank":   "{:.0f}",
+                        "Z-Score":    "{:.2f}",
+                        "Z Rank":     "{:.0f}",
+                        "Accel":      "{:.2%}",
+                        "Accel Rank": "{:.0f}",
+                        "Vol Fuel":   "{:.2f}x",
+                        "Vol Rank":   "{:.0f}",
+                        "Rank Sum":   "{:.0f}"
+                    }),
+                    use_container_width=True,
                     key="rank_matrix"
                 )
 
@@ -501,6 +543,33 @@ try:
                     agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
                     fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
                     st.pyplot(fig, clear_figure=False)
+
+                # ── Methodology ──────────────────────────────────────────
+                st.divider()
+                st.subheader("📖 Methodology")
+                fast_days_disp = max(5, training_days // 3)
+                st.markdown(f"""
+**Universe:** GLD · SLV · VNQ · TLT · TBT (Gold, Silver, Real Estate, Long Bonds, Inverse Long Bonds)
+
+**Objective:** Maximum absolute return via systematic momentum rotation. One asset (or CASH) is held at a time.
+
+**Ranking — 4 factors, max score 20:**
+
+| Factor | How it's computed | Max Rank |
+|---|---|---|
+| **Return Rank** | Total price return over the {training_months}-month training window | 5 |
+| **Z-Score Rank** | Cross-sectional z-score of returns — how far above the universe average | 5 |
+| **Momentum Acceleration** | Fast return ({fast_days_disp}d, = ⅓ of training window) minus slow return — rewards accelerating momentum | 5 |
+| **Volume Confirmation** | Ranks 1–5 only if volume fuel > 1.0× (current vol > prior window avg). Assets below 1.0× score 0 | 5 |
+
+The asset with the highest combined rank is selected, provided its return exceeds the risk-free hurdle (rolling T-bill yield over the training window). Otherwise CASH is held.
+
+**Optional Risk Brakes (sidebar):**
+- **Volatility filter** — excludes assets with 20-day annualised volatility above the selected threshold
+- **200-day MA filter** — excludes assets trading below their 200-day simple moving average
+- **Trailing stop** — switches to CASH if the 2-day cumulative return breaches the stop level; re-enters when the max cross-sectional Z-score recovers above the exit threshold
+- **Transaction cost** — applied on every position switch
+                """)
 
         except Exception as frag_err:
             st.error(f"❌ Fragment error:\n{traceback.format_exc()}")
