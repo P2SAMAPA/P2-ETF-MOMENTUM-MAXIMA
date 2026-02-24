@@ -199,7 +199,7 @@ try:
             next_day = base_date + timedelta(days=1)
             while next_day.weekday() >= 5 or next_day.strftime('%Y-%m-%d') in holidays_2026:
                 next_day += timedelta(days=1)
-            return next_day.date()
+            return next_day   # ✅ just return the date object
 
         display_date = get_next_trading_day(df.index.max().date())
 
