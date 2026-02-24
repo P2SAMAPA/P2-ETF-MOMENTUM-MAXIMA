@@ -13,6 +13,205 @@ import urllib.parse
 
 st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
 
+# ============================================================
+# MODULE-LEVEL CACHED FUNCTIONS
+# Defined here (not inside try/fragment) so their identity is
+# stable across reruns — this is what makes @st.cache_data work
+# correctly and prevents flickering.
+# ============================================================
+
+@st.cache_data(ttl=3600)
+def load_data():
+    try:
+        token = os.getenv('GITLAB_API_TOKEN')
+        if token is None:
+            return None, "❌ GITLAB_API_TOKEN environment variable not set."
+
+        proj_enc = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
+        file_enc = urllib.parse.quote('etf_momentum_data.parquet', safe='')
+        url = f"https://gitlab.com/api/v4/projects/{proj_enc}/repository/files/{file_enc}/raw?ref=main"
+
+        headers = {"PRIVATE-TOKEN": token}
+        resp = requests.get(url, headers=headers, timeout=30)
+
+        if resp.status_code != 200:
+            return None, f"❌ GitLab API error: {resp.status_code}"
+
+        content = resp.content
+
+        # GitLab may return binary files base64-encoded even via the /raw endpoint.
+        # Detect and decode if necessary before checking the Parquet magic bytes.
+        if content[:4] != b'PAR1':
+            try:
+                content = base64.b64decode(content)
+            except Exception:
+                pass
+
+        if content[:4] != b'PAR1':
+            return None, "❌ File is not a valid Parquet file."
+
+        return pd.read_parquet(BytesIO(content)), None
+    except Exception as e:
+        return None, f"⚠️ Connection Error: {e}"
+
+
+@st.cache_data
+def compute_rolling_vol(returns, window=20):
+    return returns.rolling(window).std() * np.sqrt(252)
+
+
+@st.cache_data
+def compute_sma(prices, window=200):
+    return prices.rolling(window).mean()
+
+
+@st.cache_data
+def benchmark_metrics(daily_returns_spy, daily_returns_agg, cash_daily_yields):
+    results = {}
+    rf = cash_daily_yields.mean() * 252
+    for label, bm_ret in [('SPY', daily_returns_spy), ('AGG', daily_returns_agg)]:
+        bm_ret = bm_ret.dropna()
+        bm_ann = (np.prod(1 + bm_ret) ** (252 / len(bm_ret))) - 1 if len(bm_ret) > 0 else 0
+        bm_sharpe = (bm_ann - rf) / (np.std(bm_ret) * np.sqrt(252)) if np.std(bm_ret) > 0 else 0
+        results[label] = (bm_ann, bm_sharpe)
+    return results
+
+
+@st.cache_data(show_spinner=False)
+def get_equity_curve_fig(strat_series, spy_series, agg_series):
+    fig, ax = plt.subplots(figsize=(10, 5))
+    strat_cum = (1 + strat_series).cumprod() - 1
+    spy_cum = (1 + spy_series).cumprod() - 1
+    agg_cum = (1 + agg_series).cumprod() - 1
+    ax.plot(strat_cum, label='Strategy')
+    ax.plot(spy_cum, label='SPY')
+    ax.plot(agg_cum, label='AGG')
+    ax.legend()
+    ax.set_title('Cumulative Returns')
+    ax.set_ylabel('Return')
+    ax.grid(True, alpha=0.3)
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
+                           daily_returns_universe, daily_returns_spy, daily_returns_agg,
+                           rolling_vol, sma_200,
+                           training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
+                           use_vol_filter, use_ma_filter, vol_threshold):
+
+    universe = list(prices_universe.columns)
+
+    def _calculate_metrics_for_date(target_idx):
+        actual_days = min(training_days, target_idx)
+        if actual_days < 5:
+            empty = pd.Series(0, index=universe)
+            return "CASH", empty, empty, empty, empty, empty, empty, empty
+
+        start_idx = target_idx - actual_days
+        window_prices = prices_universe.iloc[start_idx: target_idx + 1]
+        window_vols = volumes_universe.iloc[start_idx: target_idx + 1]
+        window_daily_rf = cash_daily_yields.iloc[start_idx: target_idx + 1]
+
+        rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
+        zs = (rets - rets.mean()) / (rets.std() + 1e-6)
+        v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
+
+        ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
+        z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
+        v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
+        rank_sum = ret_rank + z_rank + v_rank
+
+        valid_assets = universe.copy()
+        if use_vol_filter:
+            current_vol = rolling_vol.iloc[target_idx]
+            valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
+        if use_ma_filter:
+            current_price = prices_universe.iloc[target_idx]
+            current_sma = sma_200.iloc[target_idx]
+            valid_assets = [a for a in valid_assets if current_price[a] > current_sma[a]]
+
+        if not valid_assets:
+            final_sig = "CASH"
+        else:
+            valid_df = pd.DataFrame({
+                'rank_sum': rank_sum[valid_assets],
+                'return': rets[valid_assets]
+            }).sort_values(['rank_sum', 'return'], ascending=[False, False])
+            top_asset = valid_df.index[0]
+            rf_hurdle = np.prod(1 + window_daily_rf) - 1
+            final_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
+
+        return final_sig, rank_sum, rets, zs, v_fuel, ret_rank, z_rank, v_rank
+
+    signals = []
+    strat_returns = []
+    stop_active = False
+    prev_sig = None
+    returns_history = []
+    total_rows = len(prices_universe)
+
+    for i in range(training_days, total_rows):
+        model_sig, rank_sum, rets, zs, v_fuel, _, _, _ = _calculate_metrics_for_date(i)
+        max_z = zs.max()
+
+        if stop_active:
+            if max_z > z_exit_threshold:
+                stop_active = False
+                final_sig = model_sig
+            else:
+                final_sig = "CASH"
+        else:
+            if len(returns_history) >= 2:
+                cum_two = (1 + returns_history[-2]) * (1 + returns_history[-1]) - 1
+                if cum_two <= stop_loss_pct:
+                    stop_active = True
+                    final_sig = "CASH"
+                else:
+                    final_sig = model_sig
+            else:
+                final_sig = model_sig
+
+        day_ret = daily_returns_universe[final_sig].iloc[i] if final_sig != "CASH" else cash_daily_yields.iloc[i]
+        if prev_sig is not None and final_sig != prev_sig:
+            day_ret -= t_cost_pct
+
+        strat_returns.append(day_ret)
+        returns_history.append(day_ret)
+        signals.append({
+            'Date': prices_universe.index[i],
+            'Signal': final_sig,
+            'Net_Return': day_ret,
+            'ModelSignal': model_sig,
+            'StopActive': stop_active,
+            'MaxZ': max_z
+        })
+        prev_sig = final_sig
+
+    if not strat_returns:
+        return pd.DataFrame(), 0, 0, 0, 0
+
+    strat_df = pd.DataFrame(signals).set_index('Date')
+    returns_arr = np.array(strat_returns)
+    cum_ret = np.cumprod(1 + returns_arr) - 1
+
+    ann_ret = (np.prod(1 + returns_arr) ** (252 / len(returns_arr))) - 1
+    rf_mean = cash_daily_yields.mean() * 252
+    sharpe = (ann_ret - rf_mean) / (np.std(returns_arr) * np.sqrt(252)) if np.std(returns_arr) > 0 else 0
+
+    wealth = 1 + cum_ret
+    peak = np.maximum.accumulate(wealth)
+    drawdown = (wealth - peak) / peak
+    max_dd = np.min(drawdown)
+    daily_dd = np.min(returns_arr)
+
+    return strat_df, ann_ret, sharpe, max_dd, daily_dd
+
+
+# ============================================================
+# APP
+# ============================================================
+
 try:
     st.markdown("""
         <style>
@@ -32,47 +231,12 @@ try:
         """, unsafe_allow_html=True)
 
     # ------------------------------------------------------------
-    # DATA LOADING (cached)
+    # DATA LOADING
     # ------------------------------------------------------------
-    @st.cache_data(ttl=3600)
-    def load_data():
-        try:
-            token = os.getenv('GITLAB_API_TOKEN')
-            if token is None:
-                st.error("❌ GITLAB_API_TOKEN environment variable not set.")
-                return None
-
-            proj_enc = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
-            file_enc = urllib.parse.quote('etf_momentum_data.parquet', safe='')
-            url = f"https://gitlab.com/api/v4/projects/{proj_enc}/repository/files/{file_enc}/raw?ref=main"
-
-            headers = {"PRIVATE-TOKEN": token}
-            resp = requests.get(url, headers=headers, timeout=30)
-
-            if resp.status_code != 200:
-                st.error(f"❌ GitLab API error: {resp.status_code}")
-                return None
-
-            content = resp.content
-
-            # GitLab may return binary files base64-encoded even via the /raw endpoint.
-            # Detect and decode if necessary before checking the Parquet magic bytes.
-            if content[:4] != b'PAR1':
-                try:
-                    content = base64.b64decode(content)
-                except Exception:
-                    pass
-
-            if content[:4] != b'PAR1':
-                st.error("❌ File is not a valid Parquet file.")
-                return None
-
-            return pd.read_parquet(BytesIO(content))
-        except Exception as e:
-            st.error(f"⚠️ Connection Error: {e}")
-            return None
-
-    df = load_data()
+    df, load_error = load_data()
+    if load_error:
+        st.error(load_error)
+        st.stop()
     if df is None:
         st.stop()
 
@@ -87,8 +251,11 @@ try:
     daily_returns = prices.pct_change()
     cash_daily_yields = df[('CASH', 'Daily_Rf')]
 
+    rolling_vol = compute_rolling_vol(daily_returns[universe])
+    sma_200 = compute_sma(prices[universe])
+
     # ------------------------------------------------------------
-    # SIDEBAR CONTROLS (static, outside fragment)
+    # SIDEBAR CONTROLS
     # ------------------------------------------------------------
     with st.sidebar:
         st.title("⚙️ Model Parameters")
@@ -150,184 +317,64 @@ try:
         )
 
     # ------------------------------------------------------------
-    # HELPER FUNCTIONS (cached)
+    # FRAGMENT: only reruns when slider values change
     # ------------------------------------------------------------
-    @st.cache_data
-    def compute_rolling_vol(returns, window=20):
-        return returns.rolling(window).std() * np.sqrt(252)
-
-    @st.cache_data
-    def compute_sma(prices, window=200):
-        return prices.rolling(window).mean()
-
-    rolling_vol = compute_rolling_vol(daily_returns[universe])
-    sma_200 = compute_sma(prices[universe])
-
-    # ------------------------------------------------------------
-    # CORE SIGNAL FUNCTION (with tie‑breaker: highest return)
-    # ------------------------------------------------------------
-    def calculate_metrics_for_date(target_idx):
-        actual_days = min(training_days, target_idx)
-        if actual_days < 5:
-            return "CASH", pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe)
-
-        start_idx = target_idx - actual_days
-        window_prices = prices.iloc[start_idx : target_idx + 1][universe]
-        window_vols = volumes.iloc[start_idx : target_idx + 1][universe]
-        window_daily_rf = cash_daily_yields.iloc[start_idx : target_idx + 1]
-
-        rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
-        zs = (rets - rets.mean()) / (rets.std() + 1e-6)
-        v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
-
-        # Compute ranks (5 = best, 1 = worst)
-        ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
-        z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
-        v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
-        rank_sum = ret_rank + z_rank + v_rank  # max 15, min 3
-
-        # Apply filters
-        valid_assets = universe.copy()
-        if use_vol_filter:
-            current_vol = rolling_vol.iloc[target_idx]
-            valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
-
-        if use_ma_filter:
-            current_price = prices.iloc[target_idx][universe]
-            current_sma = sma_200.iloc[target_idx]
-            valid_assets = [a for a in valid_assets if current_price[a] > current_sma[a]]
-
-        if not valid_assets:
-            final_sig = "CASH"
-        else:
-            # Among valid assets, pick the one with highest rank sum,
-            # and if tie, highest raw return
-            valid_df = pd.DataFrame({
-                'rank_sum': rank_sum[valid_assets],
-                'return': rets[valid_assets]
-            }).sort_values(['rank_sum', 'return'], ascending=[False, False])
-            top_asset = valid_df.index[0]
-
-            rf_hurdle = np.prod(1 + window_daily_rf) - 1
-            final_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
-
-        return final_sig, rank_sum, rets, zs, v_fuel, ret_rank, z_rank, v_rank
-
-    # ------------------------------------------------------------
-    # BACKTEST WITH STOP LOSS (cached)
-    # ------------------------------------------------------------
-    @st.cache_data(show_spinner=False)
-    def run_backtest_with_stop(training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-                               use_vol_filter, use_ma_filter, vol_threshold):
-        signals = []
-        strat_returns = []
-        stop_active = False
-        prev_sig = None
-        returns_history = []
-
-        for i in range(training_days, len(df)):
-            model_sig, rank_sum, rets, zs, v_fuel, _, _, _ = calculate_metrics_for_date(i)
-            max_z = zs.max()
-
-            # Stop logic
-            if stop_active:
-                if max_z > z_exit_threshold:
-                    stop_active = False
-                    final_sig = model_sig
-                else:
-                    final_sig = "CASH"
-            else:
-                if len(returns_history) >= 2:
-                    cum_two = (1 + returns_history[-2]) * (1 + returns_history[-1]) - 1
-                    if cum_two <= stop_loss_pct:
-                        stop_active = True
-                        final_sig = "CASH"
-                    else:
-                        final_sig = model_sig
-                else:
-                    final_sig = model_sig
-
-            day_ret = daily_returns.iloc[i][final_sig] if final_sig != "CASH" else cash_daily_yields.iloc[i]
-            if prev_sig is not None and final_sig != prev_sig:
-                day_ret -= t_cost_pct
-
-            strat_returns.append(day_ret)
-            returns_history.append(day_ret)
-            signals.append({
-                'Date': df.index[i],
-                'Signal': final_sig,
-                'Net_Return': day_ret,
-                'ModelSignal': model_sig,
-                'StopActive': stop_active,
-                'MaxZ': max_z
-            })
-            prev_sig = final_sig
-
-        if not strat_returns:
-            return pd.DataFrame(), 0, 0, 0, 0
-
-        strat_df = pd.DataFrame(signals).set_index('Date')
-        returns_arr = np.array(strat_returns)
-        cum_ret = np.cumprod(1 + returns_arr) - 1
-
-        ann_ret = (np.prod(1 + returns_arr) ** (252 / len(returns_arr))) - 1
-        rf_mean = cash_daily_yields.mean() * 252
-        sharpe = (ann_ret - rf_mean) / (np.std(returns_arr) * np.sqrt(252)) if np.std(returns_arr) > 0 else 0
-
-        wealth = 1 + cum_ret
-        peak = np.maximum.accumulate(wealth)
-        drawdown = (wealth - peak) / peak
-        max_dd = np.min(drawdown)
-        daily_dd = np.min(returns_arr)
-
-        return strat_df, ann_ret, sharpe, max_dd, daily_dd
-
-    # ------------------------------------------------------------
-    # FRAGMENT: all dynamic content reruns only when sliders change
-    # ------------------------------------------------------------
-    # Benchmark metrics (cached) — defined at module level so cache key is stable
-    @st.cache_data
-    def benchmark_metrics(ticker):
-        bm_ret = daily_returns[ticker].dropna()
-        bm_ann = (np.prod(1 + bm_ret) ** (252 / len(bm_ret))) - 1 if len(bm_ret) > 0 else 0
-        rf = cash_daily_yields.mean() * 252
-        bm_sharpe = (bm_ann - rf) / (np.std(bm_ret) * np.sqrt(252)) if np.std(bm_ret) > 0 else 0
-        return bm_ann, bm_sharpe
-
-    # Equity curve figure (cached) — defined at module level so cache key is stable
-    # Uses @st.cache_data (not @st.cache_resource) because it is data-derived, not a shared global resource
-    @st.cache_data(show_spinner=False)
-    def get_equity_curve_fig(strat_series, spy_series, agg_series):
-        fig, ax = plt.subplots(figsize=(10, 5))
-        strat_cum = (1 + strat_series).cumprod() - 1
-        spy_cum = (1 + spy_series).cumprod() - 1
-        agg_cum = (1 + agg_series).cumprod() - 1
-        ax.plot(strat_cum, label='Strategy')
-        ax.plot(spy_cum, label='SPY')
-        ax.plot(agg_cum, label='AGG')
-        ax.legend()
-        ax.set_title('Cumulative Returns')
-        ax.set_ylabel('Return')
-        ax.grid(True, alpha=0.3)
-        return fig
-
     @st.fragment
     def update_dashboard():
         with st.spinner("Running backtest..."):
             strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
+                prices[universe], volumes[universe], cash_daily_yields,
+                daily_returns[universe], daily_returns['SPY'], daily_returns['AGG'],
+                rolling_vol, sma_200,
                 training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
                 use_vol_filter, use_ma_filter, vol_threshold
             )
 
-        spy_ann, spy_sharpe = benchmark_metrics('SPY')
-        agg_ann, agg_sharpe = benchmark_metrics('AGG')
+        bm = benchmark_metrics(daily_returns['SPY'], daily_returns['AGG'], cash_daily_yields)
+        spy_ann, spy_sharpe = bm['SPY']
+        agg_ann, agg_sharpe = bm['AGG']
 
         # Audit trail
         audit_df = strat_df.tail(15)
         hit_ratio = len(audit_df[audit_df['Net_Return'] > 0]) / len(audit_df) if len(audit_df) > 0 else 0
 
-        # Current signal and ranking matrix (with rank details)
-        curr_sig, rank_sum, final_rets, final_zs, final_vols, ret_rank, z_rank, v_rank = calculate_metrics_for_date(len(df)-1)
+        # Current signal (lightweight recompute for the last row only)
+        last_idx = len(prices) - 1
+        actual_days = min(training_days, last_idx)
+        start_idx = last_idx - actual_days
+        window_prices = prices[universe].iloc[start_idx: last_idx + 1]
+        window_vols = volumes[universe].iloc[start_idx: last_idx + 1]
+        window_daily_rf = cash_daily_yields.iloc[start_idx: last_idx + 1]
+
+        rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
+        zs = (rets - rets.mean()) / (rets.std() + 1e-6)
+        v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
+
+        ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
+        z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
+        v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
+        rank_sum = ret_rank + z_rank + v_rank
+        final_rets, final_zs, final_vols = rets, zs, v_fuel
+
+        valid_assets = universe.copy()
+        if use_vol_filter:
+            current_vol = rolling_vol.iloc[last_idx]
+            valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
+        if use_ma_filter:
+            current_price = prices[universe].iloc[last_idx]
+            current_sma = sma_200.iloc[last_idx]
+            valid_assets = [a for a in valid_assets if current_price[a] > current_sma[a]]
+
+        if not valid_assets:
+            curr_sig = "CASH"
+        else:
+            valid_df = pd.DataFrame({
+                'rank_sum': rank_sum[valid_assets],
+                'return': rets[valid_assets]
+            }).sort_values(['rank_sum', 'return'], ascending=[False, False])
+            top_asset = valid_df.index[0]
+            rf_hurdle = np.prod(1 + window_daily_rf) - 1
+            curr_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
 
         # Next trading day projection
         holidays_2026 = ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
@@ -385,6 +432,7 @@ try:
             key="audit_trail"
         )
 
+        # Equity curve
         if not strat_df.empty:
             st.subheader("📈 Equity Curve")
             strat_series = strat_df['Net_Return'].copy()
