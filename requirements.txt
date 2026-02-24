@@ -7,3 +7,4 @@ fastparquet
 yfinance
 pandas-datareader
 pandas_market_calendars
+matplotlib  # Added for equity curve charting in UI
