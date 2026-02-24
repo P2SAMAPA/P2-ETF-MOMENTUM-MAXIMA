@@ -155,12 +155,12 @@ try:
     sma_200 = compute_sma(prices[universe])
 
     # ------------------------------------------------------------
-    # CORE SIGNAL FUNCTION (now using rank‑based score)
+    # CORE SIGNAL FUNCTION (fixed NaN handling)
     # ------------------------------------------------------------
     def calculate_metrics_for_date(target_idx):
         actual_days = min(training_days, target_idx)
         if actual_days < 5:
-            return "CASH", pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe)
+            return "CASH", pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe), pd.Series(0, index=universe)
 
         start_idx = target_idx - actual_days
         window_prices = prices.iloc[start_idx : target_idx + 1][universe]
@@ -171,11 +171,11 @@ try:
         zs = (rets - rets.mean()) / (rets.std() + 1e-6)
         v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
 
-        # Compute ranks (1 = worst, 5 = best) for each factor
-        ret_rank = rets.rank(method='min', ascending=False).astype(int)
-        z_rank = zs.rank(method='min', ascending=False).astype(int)
-        v_rank = v_fuel.rank(method='min', ascending=False).astype(int)
-        rank_sum = ret_rank + z_rank + v_rank  # max 15
+        # Compute ranks (1 = best, 5 = worst) – fill NaN with 0 to avoid conversion errors
+        ret_rank = rets.rank(method='min', ascending=False).fillna(0).astype(int)
+        z_rank = zs.rank(method='min', ascending=False).fillna(0).astype(int)
+        v_rank = v_fuel.rank(method='min', ascending=False).fillna(0).astype(int)
+        rank_sum = ret_rank + z_rank + v_rank  # max 15, min 0 (if all ranks are 0, unlikely)
 
         # Apply filters
         valid_assets = universe.copy()
