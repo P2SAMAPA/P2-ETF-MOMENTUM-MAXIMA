@@ -382,124 +382,125 @@ try:
                 st.session_state.render_count = 0
             st.session_state.render_count += 1
             st.caption(f"🔁 Render #{st.session_state.render_count}")
-        strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
-            prices[universe], volumes[universe], cash_daily_yields,
-            daily_returns[universe], daily_returns['SPY'], daily_returns['AGG'],
-            rolling_vol, sma_200,
-            training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
-            use_vol_filter, use_ma_filter, vol_threshold
-        )
 
-        bm = benchmark_metrics(daily_returns['SPY'], daily_returns['AGG'], cash_daily_yields)
-        spy_ann, spy_sharpe = bm['SPY']
-        agg_ann, agg_sharpe = bm['AGG']
+            strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
+                prices[universe], volumes[universe], cash_daily_yields,
+                daily_returns[universe], daily_returns['SPY'], daily_returns['AGG'],
+                rolling_vol, sma_200,
+                training_days, t_cost_pct, stop_loss_pct, z_exit_threshold,
+                use_vol_filter, use_ma_filter, vol_threshold
+            )
 
-        # Audit trail
-        audit_df = strat_df.tail(15)
-        hit_ratio = len(audit_df[audit_df['Net_Return'] > 0]) / len(audit_df) if len(audit_df) > 0 else 0
+            bm = benchmark_metrics(daily_returns['SPY'], daily_returns['AGG'], cash_daily_yields)
+            spy_ann, spy_sharpe = bm['SPY']
+            agg_ann, agg_sharpe = bm['AGG']
 
-        # Current signal (lightweight recompute for the last row only)
-        last_idx = len(prices) - 1
-        actual_days = min(training_days, last_idx)
-        start_idx = last_idx - actual_days
-        window_prices = prices[universe].iloc[start_idx: last_idx + 1]
-        window_vols = volumes[universe].iloc[start_idx: last_idx + 1]
-        window_daily_rf = cash_daily_yields.iloc[start_idx: last_idx + 1]
+            # Audit trail
+            audit_df = strat_df.tail(15)
+            hit_ratio = len(audit_df[audit_df['Net_Return'] > 0]) / len(audit_df) if len(audit_df) > 0 else 0
 
-        rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
-        zs = (rets - rets.mean()) / (rets.std() + 1e-6)
-        v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
+            # Current signal (lightweight recompute for the last row only)
+            last_idx = len(prices) - 1
+            actual_days = min(training_days, last_idx)
+            start_idx = last_idx - actual_days
+            window_prices = prices[universe].iloc[start_idx: last_idx + 1]
+            window_vols = volumes[universe].iloc[start_idx: last_idx + 1]
+            window_daily_rf = cash_daily_yields.iloc[start_idx: last_idx + 1]
 
-        ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
-        z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
-        v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
-        rank_sum = ret_rank + z_rank + v_rank
-        final_rets, final_zs, final_vols = rets, zs, v_fuel
+            rets = (window_prices.iloc[-1] / window_prices.iloc[0]) - 1
+            zs = (rets - rets.mean()) / (rets.std() + 1e-6)
+            v_fuel = window_vols.iloc[-1] / window_vols.iloc[:-1].mean()
 
-        valid_assets = universe.copy()
-        if use_vol_filter:
-            current_vol = rolling_vol.iloc[last_idx]
-            valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
-        if use_ma_filter:
-            current_price = prices[universe].iloc[last_idx]
-            current_sma = sma_200.iloc[last_idx]
-            valid_assets = [a for a in valid_assets if current_price[a] > current_sma[a]]
+            ret_rank = rets.rank(method='min', ascending=True).fillna(0).astype(int)
+            z_rank = zs.rank(method='min', ascending=True).fillna(0).astype(int)
+            v_rank = v_fuel.rank(method='min', ascending=True).fillna(0).astype(int)
+            rank_sum = ret_rank + z_rank + v_rank
+            final_rets, final_zs, final_vols = rets, zs, v_fuel
 
-        if not valid_assets:
-            curr_sig = "CASH"
-        else:
-            valid_df = pd.DataFrame({
-                'rank_sum': rank_sum[valid_assets],
-                'return': rets[valid_assets]
-            }).sort_values(['rank_sum', 'return'], ascending=[False, False])
-            top_asset = valid_df.index[0]
-            rf_hurdle = np.prod(1 + window_daily_rf) - 1
-            curr_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
+            valid_assets = universe.copy()
+            if use_vol_filter:
+                current_vol = rolling_vol.iloc[last_idx]
+                valid_assets = [a for a in valid_assets if current_vol[a] <= vol_threshold]
+            if use_ma_filter:
+                current_price = prices[universe].iloc[last_idx]
+                current_sma = sma_200.iloc[last_idx]
+                valid_assets = [a for a in valid_assets if current_price[a] > current_sma[a]]
 
-        # Next trading day projection
-        holidays_2026 = ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
-                         "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
-        def next_trading_day(base):
-            d = base + timedelta(days=1)
-            while d.weekday() >= 5 or d.strftime('%Y-%m-%d') in holidays_2026:
-                d += timedelta(days=1)
-            return d
-        display_date = next_trading_day(df.index.max().date())
+            if not valid_assets:
+                curr_sig = "CASH"
+            else:
+                valid_df = pd.DataFrame({
+                    'rank_sum': rank_sum[valid_assets],
+                    'return': rets[valid_assets]
+                }).sort_values(['rank_sum', 'return'], ascending=[False, False])
+                top_asset = valid_df.index[0]
+                rf_hurdle = np.prod(1 + window_daily_rf) - 1
+                curr_sig = "CASH" if rets[top_asset] < rf_hurdle else top_asset
 
-        # Dashboard metrics
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Strat Ann. Return", f"{ann_ret:.2%}")
-        col1.metric("SPY Ann. Return", f"{spy_ann:.2%}")
-        col1.metric("AGG Ann. Return", f"{agg_ann:.2%}")
-        col2.metric("Strat Sharpe", f"{sharpe:.2f}")
-        col2.metric("SPY Sharpe", f"{spy_sharpe:.2f}")
-        col2.metric("AGG Sharpe", f"{agg_sharpe:.2f}")
-        col3.metric("Max DD (P-T)", f"{max_dd:.1%}")
-        col4.metric("Max DD (Daily)", f"{daily_dd:.1%}")
-        col5.metric("Hit Ratio (15d)", f"{hit_ratio:.0%}")
+            # Next trading day projection
+            holidays_2026 = ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+                             "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"]
+            def next_trading_day(base):
+                d = base + timedelta(days=1)
+                while d.weekday() >= 5 or d.strftime('%Y-%m-%d') in holidays_2026:
+                    d += timedelta(days=1)
+                return d
+            display_date = next_trading_day(df.index.max().date())
 
-        # Signal banner
-        bg = "#00d1b2" if curr_sig != "CASH" else "#ff4b4b"
-        st.markdown(
-            f'<div class="signal-banner" style="background-color:{bg};">'
-            f'<div style="text-transform:uppercase;">Next Session: {display_date}</div>'
-            f'<div class="signal-text">{curr_sig}</div></div>',
-            unsafe_allow_html=True
-        )
+            # Dashboard metrics
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Strat Ann. Return", f"{ann_ret:.2%}")
+            col1.metric("SPY Ann. Return", f"{spy_ann:.2%}")
+            col1.metric("AGG Ann. Return", f"{agg_ann:.2%}")
+            col2.metric("Strat Sharpe", f"{sharpe:.2f}")
+            col2.metric("SPY Sharpe", f"{spy_sharpe:.2f}")
+            col2.metric("AGG Sharpe", f"{agg_sharpe:.2f}")
+            col3.metric("Max DD (P-T)", f"{max_dd:.1%}")
+            col4.metric("Max DD (Daily)", f"{daily_dd:.1%}")
+            col5.metric("Hit Ratio (15d)", f"{hit_ratio:.0%}")
 
-        # Ranking matrix
-        st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
-        rank_df = pd.DataFrame({
-            "ETF": universe,
-            "Return": final_rets,
-            "Z-Score": final_zs,
-            "Vol Fuel": final_vols,
-            "Rank Sum": rank_sum
-        }).sort_values("Rank Sum", ascending=False)
-        st.dataframe(
-            rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Rank Sum": "{:.0f}"}),
-            width='stretch',
-            key="rank_matrix"
-        )
+            # Signal banner
+            bg = "#00d1b2" if curr_sig != "CASH" else "#ff4b4b"
+            st.markdown(
+                f'<div class="signal-banner" style="background-color:{bg};">'
+                f'<div style="text-transform:uppercase;">Next Session: {display_date}</div>'
+                f'<div class="signal-text">{curr_sig}</div></div>',
+                unsafe_allow_html=True
+            )
 
-        # Audit trail
-        st.subheader("📋 Audit Trail (Last 15 Trading Days)")
-        def color_rets(v):
-            return f'color: {"#00d1b2" if v > 0 else "#ff4b4b"}'
-        st.dataframe(
-            audit_df[['Signal', 'Net_Return']].style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"}),
-            use_container_width=True,
-            key="audit_trail"
-        )
+            # Ranking matrix
+            st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
+            rank_df = pd.DataFrame({
+                "ETF": universe,
+                "Return": final_rets,
+                "Z-Score": final_zs,
+                "Vol Fuel": final_vols,
+                "Rank Sum": rank_sum
+            }).sort_values("Rank Sum", ascending=False)
+            st.dataframe(
+                rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Rank Sum": "{:.0f}"}),
+                width='stretch',
+                key="rank_matrix"
+            )
 
-        # Equity curve
-        if not strat_df.empty:
-            st.subheader("📈 Equity Curve")
-            strat_series = strat_df['Net_Return'].copy()
-            spy_series = daily_returns['SPY'].loc[strat_df.index].copy()
-            agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
-            fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
-            st.pyplot(fig, clear_figure=False)
+            # Audit trail
+            st.subheader("📋 Audit Trail (Last 15 Trading Days)")
+            def color_rets(v):
+                return f'color: {"#00d1b2" if v > 0 else "#ff4b4b"}'
+            st.dataframe(
+                audit_df[['Signal', 'Net_Return']].style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"}),
+                use_container_width=True,
+                key="audit_trail"
+            )
+
+            # Equity curve
+            if not strat_df.empty:
+                st.subheader("📈 Equity Curve")
+                strat_series = strat_df['Net_Return'].copy()
+                spy_series = daily_returns['SPY'].loc[strat_df.index].copy()
+                agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
+                fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
+                st.pyplot(fig, clear_figure=False)
 
         except Exception as frag_err:
             st.error(f"❌ Fragment error:\n{traceback.format_exc()}")
