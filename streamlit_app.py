@@ -381,7 +381,6 @@ try:
             if 'render_count' not in st.session_state:
                 st.session_state.render_count = 0
             st.session_state.render_count += 1
-            st.caption(f"🔁 Render #{st.session_state.render_count}")
 
             strat_df, ann_ret, sharpe, max_dd, daily_dd = run_backtest_with_stop(
                 prices[universe], volumes[universe], cash_daily_yields,
@@ -447,60 +446,61 @@ try:
                 return d
             display_date = next_trading_day(df.index.max().date())
 
-            # Dashboard metrics
-            col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Strat Ann. Return", f"{ann_ret:.2%}")
-            col1.metric("SPY Ann. Return", f"{spy_ann:.2%}")
-            col1.metric("AGG Ann. Return", f"{agg_ann:.2%}")
-            col2.metric("Strat Sharpe", f"{sharpe:.2f}")
-            col2.metric("SPY Sharpe", f"{spy_sharpe:.2f}")
-            col2.metric("AGG Sharpe", f"{agg_sharpe:.2f}")
-            col3.metric("Max DD (P-T)", f"{max_dd:.1%}")
-            col4.metric("Max DD (Daily)", f"{daily_dd:.1%}")
-            col5.metric("Hit Ratio (15d)", f"{hit_ratio:.0%}")
+            # ----------------------------------------------------------
+            # Render all output into a single container so the browser
+            # paints everything in one go rather than streaming elements
+            # ----------------------------------------------------------
+            container = st.container()
+            with container:
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1.metric("Strat Ann. Return", f"{ann_ret:.2%}")
+                col1.metric("SPY Ann. Return", f"{spy_ann:.2%}")
+                col1.metric("AGG Ann. Return", f"{agg_ann:.2%}")
+                col2.metric("Strat Sharpe", f"{sharpe:.2f}")
+                col2.metric("SPY Sharpe", f"{spy_sharpe:.2f}")
+                col2.metric("AGG Sharpe", f"{agg_sharpe:.2f}")
+                col3.metric("Max DD (P-T)", f"{max_dd:.1%}")
+                col4.metric("Max DD (Daily)", f"{daily_dd:.1%}")
+                col5.metric("Hit Ratio (15d)", f"{hit_ratio:.0%}")
 
-            # Signal banner
-            bg = "#00d1b2" if curr_sig != "CASH" else "#ff4b4b"
-            st.markdown(
-                f'<div class="signal-banner" style="background-color:{bg};">'
-                f'<div style="text-transform:uppercase;">Next Session: {display_date}</div>'
-                f'<div class="signal-text">{curr_sig}</div></div>',
-                unsafe_allow_html=True
-            )
+                bg = "#00d1b2" if curr_sig != "CASH" else "#ff4b4b"
+                st.markdown(
+                    f'<div class="signal-banner" style="background-color:{bg};">'
+                    f'<div style="text-transform:uppercase;">Next Session: {display_date}</div>'
+                    f'<div class="signal-text">{curr_sig}</div></div>',
+                    unsafe_allow_html=True
+                )
 
-            # Ranking matrix
-            st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
-            rank_df = pd.DataFrame({
-                "ETF": universe,
-                "Return": final_rets,
-                "Z-Score": final_zs,
-                "Vol Fuel": final_vols,
-                "Rank Sum": rank_sum
-            }).sort_values("Rank Sum", ascending=False)
-            st.dataframe(
-                rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Rank Sum": "{:.0f}"}),
-                width='stretch',
-                key="rank_matrix"
-            )
+                st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
+                rank_df = pd.DataFrame({
+                    "ETF": universe,
+                    "Return": final_rets,
+                    "Z-Score": final_zs,
+                    "Vol Fuel": final_vols,
+                    "Rank Sum": rank_sum
+                }).sort_values("Rank Sum", ascending=False)
+                st.dataframe(
+                    rank_df.style.format({"Return": "{:.2%}", "Z-Score": "{:.2f}", "Vol Fuel": "{:.2f}x", "Rank Sum": "{:.0f}"}),
+                    width='stretch',
+                    key="rank_matrix"
+                )
 
-            # Audit trail
-            st.subheader("📋 Audit Trail (Last 15 Trading Days)")
-            def color_rets(v):
-                return f'color: {"#00d1b2" if v > 0 else "#ff4b4b"}'
-            st.dataframe(
-                audit_df[['Signal', 'Net_Return']].style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"}),
-                use_container_width=True,
-                key="audit_trail"
-            )
+                st.subheader("📋 Audit Trail (Last 15 Trading Days)")
+                def color_rets(v):
+                    return f'color: {"#00d1b2" if v > 0 else "#ff4b4b"}'
+                st.dataframe(
+                    audit_df[['Signal', 'Net_Return']].style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"}),
+                    use_container_width=True,
+                    key="audit_trail"
+                )
 
-            # Equity curve
-            if not strat_df.empty:
-                st.subheader("📈 Equity Curve")
-                strat_series = strat_df['Net_Return'].copy()
-                spy_series = daily_returns['SPY'].loc[strat_df.index].copy()
-                agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
-                fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
-                st.pyplot(fig, clear_figure=False)
+                if not strat_df.empty:
+                    st.subheader("📈 Equity Curve")
+                    strat_series = strat_df['Net_Return'].copy()
+                    spy_series = daily_returns['SPY'].loc[strat_df.index].copy()
+                    agg_series = daily_returns['AGG'].loc[strat_df.index].copy()
+                    fig = get_equity_curve_fig(strat_series, spy_series, agg_series)
+                    st.pyplot(fig, clear_figure=False)
 
         except Exception as frag_err:
             st.error(f"❌ Fragment error:\n{traceback.format_exc()}")
