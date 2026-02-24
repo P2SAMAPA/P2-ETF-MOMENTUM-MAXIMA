@@ -12,7 +12,6 @@ import pandas_market_calendars as mcal
 # --- 1. PAGE CONFIG & HIGH-CONTRAST THEME ---
 st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
 
-# FIX 1: Remove unsafe_proxy parameter - it's not needed
 st.markdown("""
     <style>
     .stMetric { background-color: #1e2329; padding: 15px; border-radius: 8px; border: 1px solid #30363d; }
@@ -30,16 +29,12 @@ st.markdown("""
     }
     .signal-text { font-size: 2.5rem; }  /* Reduced size for better fit */
     </style>
-    """, unsafe_allow_html=True)  # This parameter is correct
+    """, unsafe_allow_html=True)
 
 @st.cache_data(ttl=3600)
 def load_data():
     try:
         token = os.getenv('GITLAB_API_TOKEN')
-        if not token:
-            st.error("⚠️ GITLAB_API_TOKEN environment variable not set")
-            return None
-            
         project_path = 'p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA'
         gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
         project = gl.projects.get(project_path)
@@ -49,7 +44,12 @@ def load_data():
         
         # Decode Base64 content to binary
         file_content = base64.b64decode(file_info.content)
-        
+
+        # ---- DEBUG ----
+        print("DEBUG: File size =", len(file_content), "bytes")
+        print("DEBUG: First 50 bytes =", file_content[:50])
+        # --------------
+
         return pd.read_parquet(BytesIO(file_content))
     except Exception as e:
         st.error(f"⚠️ Connection Error: {e}")
@@ -191,7 +191,7 @@ if df is not None:
 
     st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix")
     
-    # FIX 2: Handle NaN/None values before formatting
+    # Handle NaN values before formatting
     rank_df = pd.DataFrame({
         "ETF": universe, 
         "Return": final_rets, 
@@ -216,7 +216,7 @@ if df is not None:
 
     st.subheader("📋 Audit Trail (Last 15 Trading Days)")
     
-    # FIX 3: Handle NaN values in audit trail
+    # Handle NaN values in audit trail
     if not audit_df.empty:
         audit_df = audit_df.fillna(0)
         
@@ -225,7 +225,7 @@ if df is not None:
                 return ''
             return f'color: {"#00d1b2" if val > 0 else "#ff4b4b"}'
         
-        # FIX 4: Replace deprecated applymap with map
+        # Replace deprecated applymap with map
         styled_df = audit_df.style.map(color_rets, subset=['Net_Return']).format({"Net_Return": "{:.2%}"})
         st.table(styled_df)
 
