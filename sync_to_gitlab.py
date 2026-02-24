@@ -29,7 +29,7 @@ def sync():
         try:
             existing_file = project.files.get(file_path=file_path, ref='main')
             
-            # RECTIFIED: Update existing file with safety check
+            # Update existing file with safety check
             existing_file.content = base64_content
             existing_file.save(
                 branch='main',
