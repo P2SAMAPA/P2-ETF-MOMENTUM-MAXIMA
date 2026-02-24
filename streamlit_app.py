@@ -8,6 +8,8 @@ from io import BytesIO
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import traceback
+import requests
+import urllib.parse
 
 # --- 1. PAGE CONFIG MUST BE FIRST STREAMLIT COMMAND ---
 st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
@@ -40,51 +42,59 @@ try:
     # ------------------------------------------------------------
     # DATA LOADING FROM GITLAB (with enhanced error checking)
     # ------------------------------------------------------------
-    @st.cache_data(ttl=3600)
-    def load_data():
+    import requests
+import urllib.parse
+
+@st.cache_data(ttl=3600)
+def load_data():
+    try:
+        token = os.getenv('GITLAB_API_TOKEN')
+        if token is None:
+            st.error("❌ GITLAB_API_TOKEN environment variable not set.")
+            return None
+
+        # Use raw file URL (more reliable)
+        project_path_encoded = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
+        file_path_encoded = urllib.parse.quote('etf_momentum_data.parquet', safe='')
+        url = f"https://gitlab.com/api/v4/projects/{project_path_encoded}/repository/files/{file_path_encoded}/raw?ref=main"
+        
+        headers = {"PRIVATE-TOKEN": token}
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            st.error(f"❌ GitLab API error: {response.status_code}")
+            st.text(response.text[:500])
+            return None
+
+        file_content = response.content
+        st.write(f"📄 Downloaded {len(file_content)} bytes, first 20 bytes: {file_content[:20]}")
+
+        # Check magic bytes
+        if file_content[:4] != b'PAR1':
+            st.error("❌ File does not start with PAR1 – not a valid Parquet file.")
+            return None
+
+        # Try reading with pandas
         try:
-            token = os.getenv('GITLAB_API_TOKEN')
-            if token is None:
-                st.error("❌ GITLAB_API_TOKEN environment variable not set. Please add it in HF Space Secrets.")
-                return None
-
-            project_path = 'p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA'
-            gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-
-            # Test token and project access
-            try:
-                project = gl.projects.get(project_path)
-            except gitlab.exceptions.GitlabAuthenticationError:
-                st.error("❌ GitLab authentication failed. Your token may be invalid or expired.")
-                return None
-            except gitlab.exceptions.GitlabGetError as e:
-                st.error(f"❌ GitLab project not found. Check project path: {project_path}\nError: {e}")
-                return None
-
-            # Fetch file metadata
-            try:
-                file_info = project.files.get(file_path='etf_momentum_data.parquet', ref='main')
-            except gitlab.exceptions.GitlabGetError as e:
-                st.error(f"❌ File not found in GitLab repository. Expected path: 'etf_momentum_data.parquet'\nError: {e}")
-                return None
-
-            # Decode Base64 content
-            file_content = base64.b64decode(file_info.content)
-
-            # Quick check: Parquet files start with b'PK'
-            if not file_content.startswith(b'PK'):
-                st.error("❌ Downloaded file does not appear to be a valid Parquet file (missing PK header).")
-                st.write(f"First 100 bytes: {file_content[:100]}")
-                return None
-
-            # Read into DataFrame
             df = pd.read_parquet(BytesIO(file_content))
             st.success(f"✅ Data loaded successfully. Shape: {df.shape}")
             return df
-
         except Exception as e:
-            st.error(f"⚠️ Unexpected error during data loading: {e}")
-            return None
+            st.error(f"❌ pandas.read_parquet failed: {e}")
+            # Attempt to read with pyarrow directly for more info
+            import pyarrow.parquet as pq
+            try:
+                table = pq.read_table(BytesIO(file_content))
+                st.write("✅ pyarrow could read the file. Converting to pandas...")
+                df = table.to_pandas()
+                return df
+            except Exception as e2:
+                st.error(f"❌ pyarrow also failed: {e2}")
+                return None
+
+    except Exception as e:
+        st.error(f"⚠️ Connection Error: {e}")
+        return None
 
     df = load_data()
 
