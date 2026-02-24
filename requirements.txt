@@ -6,3 +6,4 @@ pyarrow
 fastparquet
 yfinance
 pandas-datareader
+matplotlib
