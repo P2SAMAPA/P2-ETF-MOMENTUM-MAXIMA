@@ -41,6 +41,7 @@ def load_data():
         file_info = project.files.get(file_path='etf_momentum_data.parquet', ref='main')
         
         # RECTIFIED: Decode Base64 content to binary to fix "Magic Bytes" error
+        # The file content from the GitLab API is base64 encoded by default.
         file_content = base64.b64decode(file_info.content)
         
         return pd.read_parquet(BytesIO(file_content))
