@@ -320,8 +320,10 @@ try:
     UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI']
     benchmarks  = ['SPY', 'AGG']
 
-    prices        = df.xs('Close',  axis=1, level=1)[UNIVERSE_FI + UNIVERSE_EQ + benchmarks].copy()
-    volumes       = df.xs('Volume', axis=1, level=1)[UNIVERSE_FI + UNIVERSE_EQ + benchmarks].copy()
+    # Deduplicate: SPY appears in both UNIVERSE_EQ and benchmarks
+    all_tickers = list(dict.fromkeys(UNIVERSE_FI + UNIVERSE_EQ + benchmarks))
+    prices        = df.xs('Close',  axis=1, level=1)[all_tickers].copy()
+    volumes       = df.xs('Volume', axis=1, level=1)[all_tickers].copy()
     daily_returns = prices.pct_change()
     cash_daily_yields = df[('CASH', 'Daily_Rf')]
 
