@@ -314,21 +314,41 @@ try:
     st.info(f"📁 Dataset updated till: **{df.index.max().date()}**")
     st.title("🚀 P2-ETF Momentum Maxima")
 
-    universe = ['GLD', 'SLV', 'VNQ', 'TLT', 'TBT']
-    benchmarks = ['SPY', 'AGG']
-    prices = df.xs('Close', axis=1, level=1)[universe + benchmarks]
-    volumes = df.xs('Volume', axis=1, level=1)[universe + benchmarks]
+    # Two universes — cleanly separated
+    UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'TBT']
+    UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI']
+    benchmarks  = ['SPY', 'AGG']
+
+    prices        = df.xs('Close',  axis=1, level=1)[UNIVERSE_FI + UNIVERSE_EQ + benchmarks].copy()
+    volumes       = df.xs('Volume', axis=1, level=1)[UNIVERSE_FI + UNIVERSE_EQ + benchmarks].copy()
     daily_returns = prices.pct_change()
     cash_daily_yields = df[('CASH', 'Daily_Rf')]
 
-    rolling_vol = compute_rolling_vol(daily_returns[universe])
-    sma_200 = compute_sma(prices[universe])
+    rolling_vol_fi = compute_rolling_vol(daily_returns[UNIVERSE_FI])
+    rolling_vol_eq = compute_rolling_vol(daily_returns[UNIVERSE_EQ])
+    sma_200_fi     = compute_sma(prices[UNIVERSE_FI])
+    sma_200_eq     = compute_sma(prices[UNIVERSE_EQ])
 
     # ------------------------------------------------------------
     # SIDEBAR CONTROLS
     # ------------------------------------------------------------
     with st.sidebar:
         st.title("⚙️ Model Parameters")
+
+        # ── Option selector ──────────────────────────────────────
+        st.subheader("📂 Universe")
+        selected_option = st.radio(
+            "Select Universe",
+            options=["Option A — Fixed Income", "Option B — Equities"],
+            key="selected_option",
+            label_visibility="collapsed"
+        )
+        universe = UNIVERSE_FI if "Fixed Income" in selected_option else UNIVERSE_EQ
+        option_label = "Fixed Income" if "Fixed Income" in selected_option else "Equities"
+        rolling_vol = rolling_vol_fi if "Fixed Income" in selected_option else rolling_vol_eq
+        sma_200     = sma_200_fi     if "Fixed Income" in selected_option else sma_200_eq
+
+        st.divider()
         training_months = st.select_slider(
             "Training Period (Months)",
             options=[3, 6, 9, 12, 15, 18],
@@ -478,6 +498,8 @@ try:
             # ----------------------------------------------------------
             container = st.container()
             with container:
+                # Show which option is active
+                st.subheader(f"{'🏦' if option_label == 'Fixed Income' else '📈'} {option_label} Universe — {selected_option.split('—')[0].strip()}")
                 col1, col2, col3, col4, col5 = st.columns(5)
                 col1.metric("Strat Ann. Return", f"{ann_ret:.2%}")
                 col1.metric("SPY Ann. Return", f"{spy_ann:.2%}")
@@ -566,7 +588,7 @@ try:
                         )
 
                 fast_days_display = max(5, training_days // 3)
-                st.subheader(f"📊 {training_months}M Multi-Factor Ranking Matrix  ·  Accel window: {fast_days_display}d")
+                st.subheader(f"📊 {training_months}M Ranking Matrix · {option_label} · Accel window: {fast_days_display}d")
                 rank_df = pd.DataFrame({
                     "ETF":        universe,
                     "Return":     final_rets,
@@ -616,8 +638,12 @@ try:
                 st.divider()
                 st.subheader("📖 Methodology")
                 fast_days_disp = max(5, training_days // 3)
+                if option_label == "Fixed Income":
+                    universe_desc = "GLD · SLV · VNQ · TLT · TBT (Gold, Silver, Real Estate, Long Bonds, Inverse Long Bonds)"
+                else:
+                    universe_desc = "SPY · QQQ · XLV · XLF · XLE · XLI (S&P 500, Nasdaq 100, Healthcare, Financials, Energy, Industrials)"
                 st.markdown(f"""
-**Universe:** GLD · SLV · VNQ · TLT · TBT (Gold, Silver, Real Estate, Long Bonds, Inverse Long Bonds)
+**Universe ({option_label}):** {universe_desc}
 
 **Objective:** Maximum absolute return via systematic momentum rotation. One asset (or CASH) is held at a time.
 
