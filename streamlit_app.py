@@ -68,11 +68,12 @@ def compute_sma(prices, window=200):
 @st.cache_data
 def benchmark_metrics(daily_returns_spy, daily_returns_agg, cash_daily_yields):
     results = {}
-    rf = cash_daily_yields.mean() * 252
+    rf = float(cash_daily_yields.mean()) * 252
     for label, bm_ret in [('SPY', daily_returns_spy), ('AGG', daily_returns_agg)]:
         bm_ret = bm_ret.dropna()
-        bm_ann = (np.prod(1 + bm_ret) ** (252 / len(bm_ret))) - 1 if len(bm_ret) > 0 else 0
-        bm_sharpe = (bm_ann - rf) / (np.std(bm_ret) * np.sqrt(252)) if np.std(bm_ret) > 0 else 0
+        bm_ann = (np.prod(1 + bm_ret.values) ** (252 / len(bm_ret))) - 1 if len(bm_ret) > 0 else 0
+        std = float(np.std(bm_ret.values))
+        bm_sharpe = (bm_ann - rf) / (std * np.sqrt(252)) if std > 0 else 0
         results[label] = (bm_ann, bm_sharpe)
     return results
 
