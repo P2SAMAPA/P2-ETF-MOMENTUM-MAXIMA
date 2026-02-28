@@ -316,7 +316,7 @@ try:
     st.title("🚀 P2-ETF Momentum Maxima")
 
     # Two universes — cleanly separated
-    UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'TBT']
+    UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'LQD', 'HYG', 'VCIT']
     UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI']
     benchmarks  = ['SPY', 'AGG']
 
@@ -642,7 +642,7 @@ try:
                 st.subheader("📖 Methodology")
                 fast_days_disp = max(5, training_days // 3)
                 if option_label == "Fixed Income":
-                    universe_desc = "GLD · SLV · VNQ · TLT · TBT (Gold, Silver, Real Estate, Long Bonds, Inverse Long Bonds)"
+                    universe_desc = "GLD · SLV · VNQ · TLT · LQD · HYG · VCIT (Gold, Silver, Real Estate, Long Bonds, Long Corp Bonds, Long HY Bonds, Long Intermediate Corp Bonds)"
                 else:
                     universe_desc = "SPY · QQQ · XLV · XLF · XLE · XLI (S&P 500, Nasdaq 100, Healthcare, Financials, Energy, Industrials)"
                 st.markdown(f"""
