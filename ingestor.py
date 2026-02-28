@@ -6,10 +6,10 @@ from datetime import datetime
 
 def fetch_data():
     # 1. Define Universe
-    # Option A — Fixed Income: TLT, TBT, VNQ, SLV, GLD
+    # Option A — Fixed Income: TLT, LQD, VNQ, SLV, GLD, HYG, VCIT
     # Option B — Equities:     SPY, QQQ, XLV, XLF, XLE, XLI
     # Benchmarks:              SPY, AGG
-    tickers = ['TLT', 'TBT', 'VNQ', 'SLV', 'GLD', 'SPY', 'AGG', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI']
+    tickers = ['TLT', 'LQD', 'VNQ', 'SLV', 'GLD', 'HYG', 'VCIT', 'SPY', 'AGG', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI']
     all_data = []
 
     for ticker in tickers:
