@@ -321,9 +321,6 @@ try:
     # DATA LOADING
     # ------------------------------------------------------------
     df, load_error = load_data()
-    st.write(df.columns.tolist()[:30])
-    st.write(df.head(2))
-    st.stop()
     if load_error:
         st.error(load_error)
         st.stop()
