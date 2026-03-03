@@ -39,8 +39,6 @@ def load_data():
 
         content = resp.content
 
-        # GitLab may return binary files base64-encoded even via the /raw endpoint.
-        # Detect and decode if necessary before checking the Parquet magic bytes.
         if content[:4] != b'PAR1':
             try:
                 content = base64.b64decode(content)
@@ -50,7 +48,25 @@ def load_data():
         if content[:4] != b'PAR1':
             return None, "❌ File is not a valid Parquet file."
 
-        return pd.read_parquet(BytesIO(content)), None
+        df = pd.read_parquet(BytesIO(content))
+
+        # ── Fetch 3-month T-bill rate from FRED as daily Rf ──────────
+        try:
+            fred_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DTB3"
+            tbill = pd.read_csv(fred_url, index_col=0, parse_dates=True)
+            tbill.index.name = 'Date'
+            tbill.columns = ['rate']
+            tbill = tbill.replace('.', pd.NA).dropna()
+            tbill['rate'] = tbill['rate'].astype(float)
+            # Convert annualised % to daily decimal: 5.0% → 0.05/252
+            tbill['Daily_Rf'] = tbill['rate'] / 100 / 252
+            tbill = tbill[['Daily_Rf']].reindex(df.index, method='ffill')
+            df[('CASH', 'Daily_Rf')] = tbill['Daily_Rf'].values
+        except Exception:
+            # Fallback: use a flat 5% annual rate if FRED is unreachable
+            df[('CASH', 'Daily_Rf')] = 0.05 / 252
+
+        return df, None
     except Exception as e:
         return None, f"⚠️ Connection Error: {e}"
 
