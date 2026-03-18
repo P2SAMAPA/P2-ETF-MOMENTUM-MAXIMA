@@ -13,8 +13,8 @@ korean-lunar-calendar==0.3.1
 pyluach==2.3.0
 toolz==1.1.0
 
-# GitLab integration
-python-gitlab==4.13.0
+# Hugging Face integration (replaces GitLab)
+huggingface-hub>=0.20.0
 requests==2.32.5
 
 # Parquet handling
@@ -34,5 +34,3 @@ fsspec==2026.2.0
 gitpython==3.1.46
 requests-toolbelt==1.0.0
 urllib3==2.6.3
-
-huggingface-hub
