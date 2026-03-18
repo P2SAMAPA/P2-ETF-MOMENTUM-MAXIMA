@@ -6,6 +6,8 @@ multi-factor ranking engine, now enhanced with three signal improvements
 grounded in the **Stochastic Damped Harmonic Oscillator (SDHO)** framework
 published in Dean (2026).
 
+**Data Infrastructure:** Historical prices stored in [Hugging Face Dataset](https://huggingface.co/datasets/P2SAMAPA/p2-etf-momentum-maxima) with daily incremental updates via GitHub Actions.
+
 ---
 
 ## What It Does
@@ -20,7 +22,7 @@ Two universes are available:
 | Universe | ETFs |
 |---|---|
 | Option A — Fixed Income / Alts | GLD · SLV · VNQ · TLT · LQD · HYG · VCIT |
-| Option B — Equities | SPY · QQQ · XLV · XLF · XLE · XLI |
+| Option B — Equities | SPY · QQQ · XLV · XLF · XLE · XLI · XLK · XLY · XLP · XLB · XLRE · XLU · XLC · XBI · XME · XHB · XSD · XRT · XAR · XNT · XNTK |
 
 Benchmarks: SPY (equity), AGG (bond)
 
@@ -225,25 +227,54 @@ These are independent of the SDHO enhancements and remain as original.
 
 ---
 
+## Data Architecture
+
+The system uses **Hugging Face Datasets** as the canonical data store,
+replacing the previous GitLab file storage architecture.
+
+### Data Flow
+
+```
+┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
+│  Yahoo Finance  │      │  GitHub Actions  │      │  Hugging Face   │
+│  + FRED (TBill) │─────▶│  (22:30 UTC)     │─────▶│  Dataset        │
+│  Daily Prices   │      │  Incremental     │      │  P2SAMAPA/      │
+└─────────────────┘      │  Update Script   │      │  p2-etf-mom...  │
+                         └──────────────────┘      └────────┬────────┘
+                                                            │
+                         ┌──────────────────┐               │
+                         │  Streamlit App   │◄──────────────┘
+                         │  (hf_hub_download)│     Public Read
+                         └──────────────────┘
+```
+
+### Key Features
+
+- **Incremental Updates:** Only new daily bars are fetched and appended (vs. rebuilding 18 years of history)
+- **Public Access:** Dataset is public; Streamlit requires no API keys to read
+- **Version Control:** HF Dataset commit history tracks every daily update
+- **Format:** Parquet with MultiIndex columns `(Ticker, Close/Volume)` + `(CASH, Daily_Rf)`
+
+---
+
 ## File Structure
 
 ```
-├── ingestor.py          # Data pipeline: fetches prices, volume, T-bill rate
-│                        # Contains PHI_LOOKBACK_MULTIPLIER and
-│                        # get_asset_training_days()
+├── streamlit_app.py          # Main app: signal generation, backtest, UI
+│                             # Reads from HF Dataset via hf_hub_download
 │
-├── streamlit_app.py     # Main app: signal generation, backtest, UI
-│                        # Contains all SDHO enhancement logic
+├── ingestor_incremental.py   # Daily incremental data fetcher
+│                             # Appends new bars to existing HF Dataset
 │
-├── requirements.txt     # Python dependencies
-│
-├── sync_to_gitlab.py    # Pushes parquet data file to GitLab for persistence
+├── requirements.txt          # Python dependencies (includes huggingface-hub)
 │
 ├── scripts/
-│   └── rebuild_gitlab_data.py   # Full data rebuild utility
+│   └── seed_hf_dataset.py    # One-time full history rebuild (18+ years)
+│                             # Run manually to initialize HF Dataset
 │
 └── .github/workflows/
-    └── sync_to_hf.yml   # CI/CD sync to Hugging Face Spaces
+    ├── seed_hf_dataset.yml   # One-time seeding workflow (manual trigger)
+    └── sync_to_hf.yml        # Daily incremental sync (22:30 UTC cron)
 ```
 
 ---
@@ -253,7 +284,7 @@ These are independent of the SDHO enhancements and remain as original.
 ### Prerequisites
 
 - Python 3.10+
-- A GitLab personal access token with `read_repository` scope
+- Hugging Face account (for dataset write access; read is public)
 - FRED API access (public, no key required for DTB3 CSV endpoint)
 
 ### Installation
@@ -266,31 +297,42 @@ pip install -r requirements.txt
 
 ### Configuration
 
-Set your GitLab token as an environment variable or in Streamlit secrets:
+**For Local Development:**
+No configuration required for reading data (public dataset).
 
-```bash
-# Environment variable
-export GITLAB_API_TOKEN=your_token_here
+**For GitHub Actions (Data Updates):**
+Add your Hugging Face token to GitHub Secrets:
+1. Generate token at https://huggingface.co/settings/tokens (Write permission)
+2. Add to GitHub → Settings → Secrets and variables → Actions:
+   - Name: `HF_TOKEN`
+   - Value: `hf_...`
 
-# Or create .streamlit/secrets.toml
-[secrets]
-GITLAB_API_TOKEN = "your_token_here"
+**For Streamlit Cloud Deployment:**
+No secrets required for the dataset (public read). If you later make the dataset private, add:
+```toml
+# .streamlit/secrets.toml
+HF_TOKEN = "hf_..."
 ```
 
-### Running the data pipeline
+### Initialize the Dataset (One-time)
+
+Run the seeding workflow to populate HF Dataset with full history:
 
 ```bash
-python ingestor.py
+# Via GitHub Actions (recommended):
+# Actions → Seed HF Dataset (Full Rebuild) → Run workflow
+
+# Or locally (if you have HF_TOKEN set):
+python scripts/seed_hf_dataset.py
 ```
 
-This fetches all ETF price/volume data from Yahoo Finance and the T-bill
-rate from FRED, then saves `etf_momentum_data.parquet`.
-
-### Running the app
+### Running the App Locally
 
 ```bash
 streamlit run streamlit_app.py
 ```
+
+The app will automatically download the dataset from Hugging Face on first load (cached for 1 hour).
 
 ---
 
@@ -315,6 +357,9 @@ mapped from nearest futures analogs (CL → XLE, ZB → TLT, etc.). ETF
 microstructure differs from futures — creation/redemption arbitrage, tracking
 error, and liquidity differences mean the exact Φ values may not transfer
 directly. The mappings are economically motivated approximations.
+
+**Data Latency:** The daily update runs at 22:30 UTC (5:30 PM EST) after market close. 
+FRED T-bill data may lag by 1 business day; the system forward-fills the last available rate.
 
 **All backtests are in-sample.** The paper's R² ≈ 0.57 is itself an
 in-sample conditional variance decomposition of momentum acceleration, not
