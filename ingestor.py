@@ -1,177 +1,133 @@
-import pandas as pd
-import pandas_datareader.data as web
-import yfinance as yf
+#!/usr/bin/env python3
+"""
+Daily incremental update for etf_momentum_data.parquet on Hugging Face.
+Fetches only new data since last update and appends to existing dataset.
+"""
+
 import os
-from datetime import datetime
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import pandas_datareader.data as web
+from datetime import datetime, timedelta
+from huggingface_hub import hf_hub_download, HfApi
+from io import BytesIO
 
-# ============================================================
-# SDHO INTEGRATION: Phi (Φ) calibration table
-# From Dean (2026) "Scale Invariant Dynamics in Market Price Momentum"
-#
-# Φ = scaled restoring force = k * Var(x) = σ²/(2Ω)
-# Measures how aggressively each asset class mean-reverts.
-#
-# HIGH Φ  → strong mean reversion → use SHORTER look-back window
-# LOW  Φ  → weak mean reversion, trends persist → use LONGER look-back window
-#
-# Empirical Φ values from paper (Table 2, 1-hour aggregation):
-#   Energy (CL):       Φ = 0.292  ← strongest mean reversion
-#   Precious metals:   Φ = 0.106
-#   Equity indices:    Φ = 0.046–0.069
-#   Fixed income (ZB): Φ = 0.021
-#   Currencies (6E):   Φ = 0.016  ← weakest mean reversion
-#
-# We map each ETF to its closest futures analog and compute
-# a look-back multiplier: multiplier = Φ_equity / Φ_asset
-# (normalised so equity = 1.0 baseline)
-# ============================================================
+REPO_ID = "P2SAMAPA/p2-etf-momentum-maxima"
+FILENAME = "etf_momentum_data.parquet"
 
-PHI_LOOKBACK_MULTIPLIER = {
-    # Energy — very high Φ (like CL futures, Φ=0.292)
-    # Mean reverts strongly → shorter window catches the signal faster
-    'XLE':  0.60,
-
-    # Precious metals — medium-high Φ (like GC futures, Φ=0.106)
-    'GLD':  0.75,
-    'SLV':  0.75,
-
-    # Real estate — medium Φ (between equity and bonds)
-    'VNQ':  0.90,
-
-    # Equity indices — baseline Φ (like ES/NQ futures, Φ=0.046–0.069)
-    'SPY':  1.00,
-    'QQQ':  1.00,
-    'XLV':  1.00,
-    'XLF':  1.00,
-    'XLI':  1.00,
-
-    # High yield bonds — slightly below equity (credit-sensitive but mean-reverts)
-    'HYG':  1.10,
-
-    # Investment grade corp bonds — low Φ (like ZB futures, Φ=0.021)
-    'VCIT': 1.25,
-    'LQD':  1.30,
-
-    # Long-duration Treasuries — lowest Φ (trends persist, like ZB/currencies)
-    'TLT':  1.40,
-
-    # Benchmark-only, not traded
-    'AGG':  1.30,
-}
+# Full universe - REMOVED XNT (delisted)
+UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'LQD', 'HYG', 'VCIT']
+UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI', 'XLK', 'XLY', 'XLP', 'XLB', 'XLRE', 'XLU', 'XLC', 'XBI', 'XME', 'XHB', 'XSD', 'XRT', 'XAR', 'XNTK']
+BENCHMARKS = ['SPY', 'AGG']
+ALL_TICKERS = list(dict.fromkeys(UNIVERSE_FI + UNIVERSE_EQ + BENCHMARKS))
 
 
-def get_asset_training_days(ticker: str, base_days: int) -> int:
-    """
-    Return the SDHO-calibrated look-back window for a given ETF.
-
-    Args:
-        ticker:    ETF ticker symbol
-        base_days: User-selected base training period in days
-
-    Returns:
-        Adjusted training days based on asset's Φ multiplier.
-        Clamped to minimum 10 days.
-    """
-    mult = PHI_LOOKBACK_MULTIPLIER.get(ticker, 1.0)
-    return max(10, int(base_days * mult))
-
-
-def fetch_data():
-    """
-    Fetch price, volume, and risk-free rate data for the full ETF universe.
-
-    Universe:
-        Option A — Fixed Income/Alts: TLT, LQD, VNQ, SLV, GLD, HYG, VCIT
-        Option B — Equities:          SPY, QQQ, XLV, XLF, XLE, XLI
-        Benchmarks:                   SPY, AGG
-
-    Output:
-        etf_momentum_data.parquet  — MultiIndex DataFrame:
-            Level 0: ticker
-            Level 1: Close, Volume, Return
-            Plus: (CASH, Rate), (CASH, Daily_Rf)
-
-    SDHO note:
-        Raw returns are stored here; the phase-space coordinates
-        (momentum x, acceleration y) are computed at runtime in
-        streamlit_app.py using the Φ-calibrated per-asset windows.
-    """
-    # Full universe including benchmarks
-    tickers = [
-        'TLT', 'LQD', 'VNQ', 'SLV', 'GLD', 'HYG', 'VCIT',
-        'SPY', 'AGG', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI'
-    ]
-
-    all_data = []
-
-    for ticker in tickers:
-        print(f"Fetching {ticker}...")
-        # Start from 2007 to provide padding for the 2008–2026 backtest
-        df = yf.download(ticker, start="2007-01-01", progress=False, auto_adjust=True)
-
-        if not df.empty:
-            # Flatten potential MultiIndex from yfinance
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            # Normalise column names
-            df.columns = [str(col).capitalize() for col in df.columns]
-
-            temp = df[['Close', 'Volume']].copy()
-            # Raw log returns for the Z-Score engine
-            # Using log returns for better cross-asset comparability
-            temp['Return'] = temp['Close'].pct_change()
-
-            # Set up MultiIndex for the combined dataframe
-            temp.columns = pd.MultiIndex.from_product([[ticker], temp.columns])
-            all_data.append(temp)
-
-    # ── Fetch FRED 3-Month T-Bill (the cash hurdle rate) ──────────────────
-    print("Fetching 3-Month T-Bill from FRED...")
+def fetch_incremental_data(start_date: datetime):
+    """Fetch only new data from start_date to today."""
+    if start_date > datetime.now():
+        return None, None
+        
+    print(f"⏳ Fetching incremental data from {start_date.date()}...")
+    
+    # Download price and volume
+    data = yf.download(
+        ALL_TICKERS,
+        start=start_date.strftime('%Y-%m-%d'),
+        progress=False,
+        auto_adjust=True
+    )
+    
+    if data.empty:
+        return None, None
+    
+    # Fetch FRED data for the same period (with buffer)
     try:
-        # DTB3 = 3-Month Treasury Bill Secondary Market Rate (annualised %)
-        rf_data = web.DataReader('DTB3', 'fred', start="2007-01-01")
-        rf_data.columns = pd.MultiIndex.from_product([['CASH'], ['Rate']])
-
-        # Convert annualised % to daily decimal return: 5.0% → 0.05/252
-        rf_data[('CASH', 'Daily_Rf')] = (rf_data[('CASH', 'Rate')] / 100) / 252
-        all_data.append(rf_data)
-        print("✅ FRED T-Bill fetched successfully.")
+        rf_recent = web.DataReader('DTB3', 'fred', start=start_date - timedelta(days=5))
+        rf_daily = rf_recent / 100 / 252
+        rf_daily.columns = ['Daily_Rf']
     except Exception as e:
-        print(f"⚠️  FRED Failed: {e}")
-        print("    Falling back to flat 5% annual rate.")
+        print(f"⚠️ FRED failed: {e}")
+        rf_daily = pd.DataFrame({'Daily_Rf': 0.0001}, index=data.index)
+    
+    return data, rf_daily
 
-    # ── Combine and align all data ─────────────────────────────────────────
-    if all_data:
-        final_df = pd.concat(all_data, axis=1)
 
-        # Forward-fill CASH rate (FRED may lag by 1–2 days)
-        final_df = final_df.ffill()
+def build_dataframe(price_vol_data, rf_data):
+    """Build the exact same MultiIndex structure."""
+    price_df = price_vol_data['Close'].copy()
+    volume_df = price_vol_data['Volume'].copy()
+    
+    combined = pd.concat([price_df, volume_df], axis=1)
+    combined.columns = pd.MultiIndex.from_tuples(
+        [(t, 'Close') for t in ALL_TICKERS] + [(t, 'Volume') for t in ALL_TICKERS]
+    )
+    
+    combined[('CASH', 'Daily_Rf')] = rf_data.reindex(combined.index).ffill()
+    
+    return combined
 
-        # Drop rows with no price data across the entire universe
-        final_df = final_df.dropna(
-            subset=[(t, 'Close') for t in tickers], how='all'
-        )
 
-        # ── Log the Φ multipliers for transparency ─────────────────────
-        print("\n📐 SDHO Φ-calibrated look-back multipliers:")
-        print(f"   {'Ticker':<8} {'Multiplier':>10}  {'Effect'}")
-        print(f"   {'-'*8} {'-'*10}  {'-'*30}")
-        for t in tickers:
-            mult = PHI_LOOKBACK_MULTIPLIER.get(t, 1.0)
-            effect = (
-                "shorter window (strong mean-reversion)" if mult < 1.0
-                else "longer window (trend persistence)" if mult > 1.0
-                else "baseline"
-            )
-            print(f"   {t:<8} {mult:>10.2f}  {effect}")
-
-        final_df.to_parquet('etf_momentum_data.parquet')
-        print(f"\n✅ Pipeline Complete. Dataset ends: {final_df.index.max().date()}")
-        print(f"   Rows: {len(final_df):,}  |  Columns: {len(final_df.columns)}")
-    else:
-        print("❌ Error: No data was fetched.")
+def update_dataset():
+    api = HfApi(token=os.getenv("HF_TOKEN"))
+    
+    # 1. Download existing dataset
+    print("⏳ Downloading existing HF dataset...")
+    existing_path = hf_hub_download(
+        repo_id=REPO_ID,
+        filename=FILENAME,
+        repo_type="dataset",
+        token=os.getenv("HF_TOKEN")
+    )
+    df_existing = pd.read_parquet(existing_path)
+    last_date = df_existing.index.max()
+    print(f"📊 Existing data ends: {last_date.date()}")
+    
+    # 2. Determine new start date (last_date + 1 day)
+    start_date = last_date + timedelta(days=1)
+    
+    # Skip weekends
+    while start_date.weekday() >= 5:
+        start_date += timedelta(days=1)
+    
+    # Check if we actually need to update
+    if start_date.date() > datetime.now().date():
+        print("✅ Dataset is already up to date")
+        return
+    
+    # 3. Fetch new data
+    new_data, new_rf = fetch_incremental_data(start_date)
+    if new_data is None or new_data.empty:
+        print("⚠️ No new market data available (markets closed or data delayed)")
+        return
+    
+    df_new = build_dataframe(new_data, new_rf)
+    print(f"📈 New data shape: {df_new.shape}")
+    
+    # 4. Combine (handle any overlap/duplicates)
+    df_combined = pd.concat([df_existing, df_new])
+    df_combined = df_combined[~df_combined.index.duplicated(keep='last')]
+    df_combined = df_combined.sort_index()
+    
+    # 5. Upload back to HF
+    print("⏳ Uploading to Hugging Face...")
+    buffer = BytesIO()
+    df_combined.to_parquet(buffer, index=True)
+    buffer.seek(0)
+    
+    api.upload_file(
+        path_or_fileobj=buffer.getvalue(),
+        path_in_repo=FILENAME,
+        repo_id=REPO_ID,
+        repo_type="dataset",
+        commit_message=f"Daily update: {start_date.date()} to {df_new.index.max().date()}"
+    )
+    
+    print(f"✅ Success! Dataset now covers: {df_combined.index.min().date()} to {df_combined.index.max().date()}")
 
 
 if __name__ == "__main__":
-    fetch_data()
+    if not os.getenv("HF_TOKEN"):
+        print("❌ HF_TOKEN not set!")
+        exit(1)
+    update_dataset()
