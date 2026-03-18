@@ -2,77 +2,41 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
-import base64
 from io import BytesIO
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import traceback
-import requests
-import urllib.parse
+from huggingface_hub import hf_hub_download
 
 st.set_page_config(page_title="P2-ETF Forecaster", layout="wide")
 
 # ============================================================
 # SDHO INTEGRATION CONSTANTS
 # From Dean (2026) "Scale Invariant Dynamics in Market Price Momentum"
-#
-# The paper discovers that market momentum follows a Stochastic
-# Damped Harmonic Oscillator (SDHO):
-#   dy/dt = -kx - Ωy + σ·dW
-# where x = momentum, y = acceleration (Δmomentum)
-#
-# Three universal dimensionless parameters characterise the dynamics:
-#
-#   Ω  ≈ 1.15  (dissipation rate) — universal across all asset classes
-#              CV < 4%; controls how fast momentum shocks decay
-#              Half-life of a momentum shock ≈ ln(2)/|λ₁| ≈ 2.5 hours
-#              At daily resolution → ~1 trading day minimum cooldown
-#
-#   R² ≈ 0.57  (deterministic fraction) — universal across all asset classes
-#              57% of momentum acceleration is predictable from phase-space
-#              position; 43% is stochastic noise
-#
-#   Φ  varies  (scaled restoring force = k·Var(x) = σ²/(2Ω))
-#              Asset-specific; encodes mean-reversion intensity
-#              High Φ → strong mean-reversion (energy, commodities)
-#              Low  Φ → trend persistence (bonds, currencies)
-#
-# Phase space quadrants (x = momentum, y = acceleration):
-#   Q1: x>0, y>0  "Accelerating rally"    → trend likely continues
-#   Q2: x>0, y<0  "Rally fading"          → mean reversion imminent  ⚠️
-#   Q3: x<0, y<0  "Accelerating decline"  → capitulation underway
-#   Q4: x<0, y>0  "Crash recovery"        → potential reversal      ✅
 # ============================================================
 
-# Ω-derived minimum cash hold after stop-loss trigger
-# Paper: momentum half-life ≈ 2.5 hours at intraday; ≈ 1 day at daily resolution
 SDHO_OMEGA = 1.15
 SDHO_R2 = 0.57
-MIN_CASH_BARS_AFTER_STOP = 1  # derived from Ω half-life at daily aggregation
+MIN_CASH_BARS_AFTER_STOP = 1
 
-# Phase quadrant rank adjustments (tuned empirically, grounded in SDHO theory)
-# Rally fading (Q2) penalty: demote assets where momentum is high but decelerating
 QUADRANT_RALLY_FADING_PENALTY = -3.0
-# Crash recovery (Q4) bonus: small reward for potential reversal setups
 QUADRANT_CRASH_RECOVERY_BONUS = 1.0
 
-# Φ-calibrated look-back multipliers per ETF
-# See ingestor.py for full derivation notes
 PHI_LOOKBACK_MULTIPLIER = {
-    'XLE':  0.60,   # Energy — Φ≈0.292 (like CL futures), strong mean-reversion
-    'GLD':  0.75,   # Gold — Φ≈0.106 (like GC futures)
-    'SLV':  0.75,   # Silver — similar to gold
-    'VNQ':  0.90,   # Real estate — between equity and bonds
-    'SPY':  1.00,   # S&P 500 — baseline Φ≈0.046 (like ES futures)
-    'QQQ':  1.00,   # Nasdaq 100 — similar to ES
-    'XLV':  1.00,   # Healthcare — equity baseline
-    'XLF':  1.00,   # Financials — equity baseline
-    'XLI':  1.00,   # Industrials — equity baseline
-    'HYG':  1.10,   # High yield — slightly below equity
-    'VCIT': 1.25,   # Intermediate corp bonds — low Φ
-    'LQD':  1.30,   # Long corp bonds — low Φ (like ZB futures)
-    'TLT':  1.40,   # Long Treasury — lowest Φ, trends persist
-    'AGG':  1.30,   # Aggregate bond (benchmark only)
+    'XLE':  0.60,
+    'GLD':  0.75,
+    'SLV':  0.75,
+    'VNQ':  0.90,
+    'SPY':  1.00,
+    'QQQ':  1.00,
+    'XLV':  1.00,
+    'XLF':  1.00,
+    'XLI':  1.00,
+    'HYG':  1.10,
+    'VCIT': 1.25,
+    'LQD':  1.30,
+    'TLT':  1.40,
+    'AGG':  1.30,
 }
 
 
@@ -88,51 +52,52 @@ def get_asset_training_days(ticker: str, base_days: int) -> int:
 
 @st.cache_data(ttl=3600)
 def load_data():
+    """
+    Load dataset from Hugging Face Dataset.
+    
+    Returns:
+        df: MultiIndex DataFrame with (Ticker, Close/Volume) columns
+        error: Error message string if failed, None if successful
+    """
     try:
-        token = os.getenv('GITLAB_API_TOKEN') or st.secrets.get("GITLAB_API_TOKEN")
-        if not token:
-            return None, "❌ GITLAB_API_TOKEN not found in environment variables or Streamlit secrets."
-
-        proj_enc = urllib.parse.quote('p2samapa-group/P2SAMAPA-P2-ETF-MOMENTUM-MAXIMA', safe='')
-        file_enc = urllib.parse.quote('etf_momentum_data.parquet', safe='')
-        url = f"https://gitlab.com/api/v4/projects/{proj_enc}/repository/files/{file_enc}/raw?ref=main"
-
-        headers = {"PRIVATE-TOKEN": token}
-        resp = requests.get(url, headers=headers, timeout=30)
-
-        if resp.status_code != 200:
-            return None, f"❌ GitLab API error: {resp.status_code}"
-
-        content = resp.content
-
-        if content[:4] != b'PAR1':
-            try:
-                content = base64.b64decode(content)
-            except Exception:
-                pass
-
-        if content[:4] != b'PAR1':
-            return None, "❌ File is not a valid Parquet file."
-
-        df = pd.read_parquet(BytesIO(content))
-
-        # ── Fetch 3-month T-bill rate from FRED ──────────────────────
-        try:
-            fred_url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DTB3"
-            tbill = pd.read_csv(fred_url, index_col=0, parse_dates=True)
-            tbill.index.name = 'Date'
-            tbill.columns = ['rate']
-            tbill = tbill.replace('.', pd.NA).dropna()
-            tbill['rate'] = tbill['rate'].astype(float)
-            tbill['Daily_Rf'] = tbill['rate'] / 100 / 252
-            tbill = tbill[['Daily_Rf']].reindex(df.index, method='ffill')
-            df[('CASH', 'Daily_Rf')] = tbill['Daily_Rf'].values
-        except Exception:
+        # Download from Hugging Face (public dataset, no token needed for read)
+        file_path = hf_hub_download(
+            repo_id="P2SAMAPA/p2-etf-momentum-maxima",
+            filename="etf_momentum_data.parquet",
+            repo_type="dataset"
+        )
+        
+        df = pd.read_parquet(file_path)
+        
+        # Ensure CASH column exists (backward compatibility check)
+        if ('CASH', 'Daily_Rf') not in df.columns:
+            # Fallback: create dummy if missing
             df[('CASH', 'Daily_Rf')] = 0.05 / 252
-
+            
+        # Ensure we have the latest FRED data for today (in case HF dataset is slightly stale)
+        try:
+            import pandas_datareader.data as web
+            from datetime import datetime, timedelta
+            
+            # Try to fetch last 30 days of FRED data to fill any recent gaps
+            recent_start = datetime.now() - timedelta(days=30)
+            rf_recent = web.DataReader('DTB3', 'fred', start=recent_start)
+            rf_recent = rf_recent / 100 / 252
+            rf_recent.columns = ['Daily_Rf']
+            
+            # Update only the recent dates that exist in our df
+            for date, row in rf_recent.iterrows():
+                if date in df.index:
+                    df.loc[date, ('CASH', 'Daily_Rf')] = row['Daily_Rf']
+                    
+        except Exception:
+            # If FRED fetch fails, continue with stored data
+            pass
+            
         return df, None
+        
     except Exception as e:
-        return None, f"⚠️ Connection Error: {e}"
+        return None, f"❌ Hugging Face Dataset error: {e}\n\nPlease verify the dataset exists at: https://huggingface.co/datasets/P2SAMAPA/p2-etf-momentum-maxima"
 
 
 @st.cache_data
@@ -186,23 +151,6 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
                            use_omega_cooldown):
     """
     Core backtest engine with optional SDHO overlays.
-
-    SDHO enhancements (all togglable via sidebar):
-    ─────────────────────────────────────────────
-    1. Φ-calibration (use_phi_calibration):
-       Per-asset look-back windows derived from the scaled restoring
-       force Φ. Assets with high Φ (energy, commodities) use shorter
-       windows; low-Φ assets (bonds) use longer windows.
-
-    2. Phase quadrant filter (use_quadrant_filter):
-       Penalises assets in the "rally fading" quadrant (x>0, y<0)
-       where the SDHO predicts imminent mean reversion. Rewards
-       assets in "crash recovery" (x<0, y>0).
-
-    3. Ω-based re-entry cooldown (use_omega_cooldown):
-       After a stop-loss trigger, enforces a minimum number of CASH
-       bars equal to the SDHO-derived momentum half-life (~1 day at
-       daily resolution) before allowing re-entry.
     """
 
     universe = list(prices_universe.columns)
@@ -213,11 +161,9 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
 
     # ── SDHO Enhancement 1: Φ-calibrated per-asset look-backs ────────────
     if use_phi_calibration:
-        # Build per-asset start_rows arrays (each column can have a different window)
         asset_windows = np.array([
             get_asset_training_days(t, training_days) for t in universe
         ])
-        # start_rows shape: (n, num_assets)
         lookback_mat = np.minimum(
             np.tile(asset_windows, (n, 1)),
             np.arange(n)[:, None]
@@ -225,13 +171,11 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
         start_rows_mat = np.maximum(
             np.arange(n)[:, None] - lookback_mat, 0
         )
-        # Vectorised return computation with per-asset windows
         rets_mat = np.zeros((n, len(universe)))
         for j in range(len(universe)):
             sr = start_rows_mat[:, j]
             rets_mat[:, j] = price_arr[:, j] / price_arr[sr, j] - 1
 
-        # Fast window: 1/3 of each asset's calibrated window
         fast_windows = np.maximum(5, asset_windows // 3)
         fast_lookback_mat = np.minimum(
             np.tile(fast_windows, (n, 1)),
@@ -245,12 +189,10 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
             sr = fast_start_rows_mat[:, j]
             fast_rets_mat[:, j] = price_arr[:, j] / price_arr[sr, j] - 1
 
-        # For RF hurdle use the median calibrated window
         median_window = int(np.median(asset_windows))
         lookback_scalar = np.minimum(np.full(n, median_window, dtype=int), np.arange(n))
         start_rows = np.maximum(np.arange(n) - lookback_scalar, 0)
     else:
-        # Original uniform window
         fast_days = max(5, training_days // 3)
         lookback = np.minimum(np.full(n, training_days, dtype=int), np.arange(n))
         start_rows = np.maximum(np.arange(n) - lookback, 0)
@@ -260,10 +202,7 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
         fast_rets_mat = price_arr / price_arr[fast_start_rows] - 1
 
     # ── Momentum acceleration (phase space y-coordinate) ─────────────────
-    # This is the key SDHO coordinate: y = Δx = change in momentum
-    # Positive y → momentum gaining strength
-    # Negative y → momentum fading (critical for quadrant filter)
-    accel_mat = fast_rets_mat - rets_mat   # shape (n, num_assets)
+    accel_mat = fast_rets_mat - rets_mat
 
     # ── Z-scores across assets at each row ────────────────────────────────
     rets_mean = rets_mat.mean(axis=1, keepdims=True)
@@ -290,30 +229,19 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
     vol_rank_mat = row_rank(vfuel_mat).astype(float)
     vol_rank_mat[vfuel_mat <= 1.0] = 0.0
 
-    # Base rank sum: max = 5+5+5+5 = 20 (unchanged from original)
     rank_sum_mat = (ret_rank_mat + z_rank_mat +
                     accel_rank_mat + vol_rank_mat).astype(float)
 
     # ── SDHO Enhancement 2: Phase quadrant filter ─────────────────────────
-    # Theory: The SDHO flow field predicts that assets in the "rally fading"
-    # quadrant (positive momentum, negative acceleration) are being pulled
-    # back toward equilibrium by the restoring force -kx.
-    #
-    # Quadrant map (x = rets_mat, y = accel_mat):
-    #   Q1 x>0, y>0: Accelerating rally   → keep ranking as-is
-    #   Q2 x>0, y<0: Rally fading         → PENALISE  (mean reversion imminent)
-    #   Q3 x<0, y<0: Accelerating decline → keep ranking as-is (accel_rank handles this)
-    #   Q4 x<0, y>0: Crash recovery       → SMALL BONUS (potential reversal)
     if use_quadrant_filter:
-        rally_fading    = (rets_mat > 0) & (accel_mat < 0)   # Q2: dangerous
-        crash_recovery  = (rets_mat < 0) & (accel_mat > 0)   # Q4: opportunistic
+        rally_fading    = (rets_mat > 0) & (accel_mat < 0)
+        crash_recovery  = (rets_mat < 0) & (accel_mat > 0)
 
         quadrant_adj = np.where(rally_fading,   quadrant_penalty, 0.0)
         quadrant_adj += np.where(crash_recovery, quadrant_bonus,   0.0)
 
         rank_sum_mat += quadrant_adj
 
-    # Max z-score per row (used for stop-loss exit)
     max_z_arr = zs_mat.max(axis=1)
 
     # ── RF hurdle ──────────────────────────────────────────────────────────
@@ -351,12 +279,6 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
     )
 
     # ── Stop-loss + SDHO Enhancement 3: Ω-based re-entry cooldown ─────────
-    # Theory: The SDHO momentum half-life is t₁/₂ = ln(2)/|λ₁| ≈ 2.5 hours
-    # at hourly resolution. At daily resolution this translates to roughly
-    # 1 trading day. After a stop trigger, we enforce a minimum CASH hold
-    # of MIN_CASH_BARS_AFTER_STOP before the z-score exit condition is checked.
-    # This prevents whipsawing back into a position while momentum is still
-    # in its initial decay phase.
     final_signals  = model_signals.copy()
     stop_active    = False
     strat_rets_arr = np.zeros(n)
@@ -374,7 +296,6 @@ def run_backtest_with_stop(prices_universe, volumes_universe, cash_daily_yields,
 
         if stop_active:
             cash_bars_held += 1
-            # Only consider z-score exit after the Ω-derived cooldown expires
             cooldown_expired = (cash_bars_held >= min_cash_bars)
             if cooldown_expired and mz <= z_exit_threshold:
                 stop_active    = False
@@ -472,7 +393,7 @@ try:
         st.stop()
 
     df = df.sort_index().ffill()
-    st.info(f"📁 Dataset updated till: **{df.index.max().date()}**")
+    st.info(f"📁 Dataset updated till: **{df.index.max().date()}** | Source: **Hugging Face Dataset**")
     st.title("🚀 P2-ETF Momentum Maxima — SDHO Enhanced")
 
     UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'LQD', 'HYG', 'VCIT']
@@ -644,7 +565,6 @@ try:
             actual_days = min(training_days, last_idx)
             fast_days   = max(5, actual_days // 3)
 
-            # Per-asset windows for live signal
             if use_phi_calibration:
                 rets_dict      = {}
                 fast_rets_dict = {}
@@ -683,7 +603,6 @@ try:
 
             rank_sum = (ret_rank + z_rank + accel_rank + vol_rank).astype(float)
 
-            # Apply quadrant adjustment to live signal
             if use_quadrant_filter:
                 rally_fading   = (rets > 0) & (accel < 0)
                 crash_recovery = (rets < 0) & (accel > 0)
@@ -837,7 +756,6 @@ try:
                     f"· Accel window: {fast_days_display}d{sdho_note}"
                 )
 
-                # Determine current quadrant for each asset
                 quadrant_labels = []
                 for asset in universe:
                     r = rets[asset]
@@ -935,6 +853,8 @@ One asset (or CASH) is held at a time.
 | **Ω re-entry cooldown** | Momentum half-life t½ ≈ 1 day (from Ω≈1.15) | Prevents whipsaw after stop-loss trigger |
 
 **Optional Risk Brakes:** Volatility filter · 200-day MA filter · Trailing stop
+
+**Data Source:** [Hugging Face Dataset](https://huggingface.co/datasets/P2SAMAPA/p2-etf-momentum-maxima) (updated daily via GitHub Actions)
                 """)
 
         except Exception as frag_err:
