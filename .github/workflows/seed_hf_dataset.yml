@@ -1,7 +1,7 @@
 name: Seed HF Dataset (Full Rebuild)
 
 on:
-  workflow_dispatch:  # Manual trigger only — run once to seed, then delete this file
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   seed-dataset:
@@ -18,7 +18,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install yfinance pandas-datareader huggingface-hub pandas numpy requests
+          pip install yfinance pandas-datareader huggingface-hub pandas numpy requests pyarrow
 
       - name: Build & Seed Dataset to HF
         env:
@@ -36,9 +36,9 @@ jobs:
           REPO_ID = "P2SAMAPA/p2-etf-momentum-maxima"
           FILENAME = "etf_momentum_data.parquet"
 
-          # Full universe (from your current ingestor)
+          # Full universe - REMOVED XNT (delisted)
           UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'LQD', 'HYG', 'VCIT']
-          UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI', 'XLK', 'XLY', 'XLP', 'XLB', 'XLRE', 'XLU', 'XLC', 'XBI', 'XME', 'XHB', 'XSD', 'XRT', 'XAR', 'XNT', 'XNTK']
+          UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI', 'XLK', 'XLY', 'XLP', 'XLB', 'XLRE', 'XLU', 'XLC', 'XBI', 'XME', 'XHB', 'XSD', 'XRT', 'XAR', 'XNTK']
           BENCHMARKS = ['SPY', 'AGG']
           ALL_TICKERS = list(dict.fromkeys(UNIVERSE_FI + UNIVERSE_EQ + BENCHMARKS))
 
@@ -62,7 +62,7 @@ jobs:
               print(f"⚠️ FRED failed: {e}")
               rf_daily = pd.DataFrame({'Daily_Rf': 0.0001}, index=data.index)
 
-          # Build MultiIndex DataFrame (exact same structure as current)
+          # Build MultiIndex DataFrame
           price_df = data['Close'].copy()
           volume_df = data['Volume'].copy()
 
@@ -72,7 +72,7 @@ jobs:
           )
 
           # Add CASH column with risk-free rate
-          combined[('CASH', 'Daily_Rf')] = rf_daily.reindex(combined.index).fillna(method='ffill')
+          combined[('CASH', 'Daily_Rf')] = rf_daily.reindex(combined.index).ffill()
 
           print(f"✅ Dataset built: {combined.shape}")
           print(f"📊 Date range: {combined.index.min().date()} to {combined.index.max().date()}")
