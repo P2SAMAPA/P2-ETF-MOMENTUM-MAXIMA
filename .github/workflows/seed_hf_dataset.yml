@@ -1,0 +1,98 @@
+name: Seed HF Dataset (Full Rebuild)
+
+on:
+  workflow_dispatch:  # Manual trigger only — run once to seed, then delete this file
+
+jobs:
+  seed-dataset:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install yfinance pandas-datareader huggingface-hub pandas numpy requests
+
+      - name: Build & Seed Dataset to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python << 'EOF'
+          import os
+          import pandas as pd
+          import numpy as np
+          import yfinance as yf
+          import pandas_datareader.data as web
+          from huggingface_hub import HfApi
+          from io import BytesIO
+
+          REPO_ID = "P2SAMAPA/p2-etf-momentum-maxima"
+          FILENAME = "etf_momentum_data.parquet"
+
+          # Full universe (from your current ingestor)
+          UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'LQD', 'HYG', 'VCIT']
+          UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI', 'XLK', 'XLY', 'XLP', 'XLB', 'XLRE', 'XLU', 'XLC', 'XBI', 'XME', 'XHB', 'XSD', 'XRT', 'XAR', 'XNT', 'XNTK']
+          BENCHMARKS = ['SPY', 'AGG']
+          ALL_TICKERS = list(dict.fromkeys(UNIVERSE_FI + UNIVERSE_EQ + BENCHMARKS))
+
+          print(f"⏳ Fetching full history for {len(ALL_TICKERS)} tickers...")
+
+          # Fetch complete history
+          data = yf.download(
+              ALL_TICKERS,
+              start="2007-01-01",
+              progress=False,
+              auto_adjust=True
+          )
+
+          # Fetch FRED 3-month T-Bill
+          print("⏳ Fetching risk-free rate from FRED...")
+          try:
+              rf = web.DataReader('DTB3', 'fred', start="2007-01-01")
+              rf_daily = rf / 100 / 252  # Convert to daily yield
+              rf_daily.columns = ['Daily_Rf']
+          except Exception as e:
+              print(f"⚠️ FRED failed: {e}")
+              rf_daily = pd.DataFrame({'Daily_Rf': 0.0001}, index=data.index)
+
+          # Build MultiIndex DataFrame (exact same structure as current)
+          price_df = data['Close'].copy()
+          volume_df = data['Volume'].copy()
+
+          combined = pd.concat([price_df, volume_df], axis=1)
+          combined.columns = pd.MultiIndex.from_tuples(
+              [(t, 'Close') for t in ALL_TICKERS] + [(t, 'Volume') for t in ALL_TICKERS]
+          )
+
+          # Add CASH column with risk-free rate
+          combined[('CASH', 'Daily_Rf')] = rf_daily.reindex(combined.index).fillna(method='ffill')
+
+          print(f"✅ Dataset built: {combined.shape}")
+          print(f"📊 Date range: {combined.index.min().date()} to {combined.index.max().date()}")
+
+          # Upload to Hugging Face
+          print("⏳ Uploading to Hugging Face Dataset...")
+          api = HfApi(token=os.getenv("HF_TOKEN"))
+          
+          buffer = BytesIO()
+          combined.to_parquet(buffer, index=True)
+          buffer.seek(0)
+          
+          api.upload_file(
+              path_or_fileobj=buffer.getvalue(),
+              path_in_repo=FILENAME,
+              repo_id=REPO_ID,
+              repo_type="dataset",
+              commit_message=f"Initial seed: Full historical dataset {combined.index.min().date()} to {combined.index.max().date()}"
+          )
+          
+          print("✅ Dataset seeded successfully to HF!")
+          print(f"🌐 URL: https://huggingface.co/datasets/{REPO_ID}/blob/main/{FILENAME}")
+          EOF
