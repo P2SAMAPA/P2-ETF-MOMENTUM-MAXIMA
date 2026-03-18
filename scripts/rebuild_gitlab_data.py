@@ -19,7 +19,7 @@ BRANCH = "main"
 
 # Updated tickers (matching your streamlit_app.py)
 UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'LQD', 'HYG', 'VCIT']
-UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI']
+UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI', 'XLK', 'XLY', 'XLP', 'XLB', 'XLRE', 'XLU', 'XLC', 'XBI', XME', 'XHB', 'XSD', 'XRT', 'XAR', 'XNT', 'XNTK']
 BENCHMARKS = ['SPY', 'AGG']
 ALL_TICKERS = list(dict.fromkeys(UNIVERSE_FI + UNIVERSE_EQ + BENCHMARKS))
 
