@@ -2,25 +2,36 @@ name: Daily ETF Data Sync to HF
 
 on:
   schedule:
-    - cron: '30 22 * * 1-5'  # 22:30 UTC weekdays
-  workflow_dispatch:
+    - cron: '30 21 * * 1-5'  # 21:30 UTC Mon-Fri (after US market close + buffer)
+  workflow_dispatch:           # allow manual trigger anytime
 
 jobs:
-  build-and-sync:
+  daily-update:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          
-      - name: Install Dependencies
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
         run: |
-          pip install yfinance pandas-datareader huggingface-hub pandas numpy pyarrow
-          
-      - name: Incremental Update HF Dataset
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run incremental update
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python ingestor_incremental.py
+        run: python ingestor.py
