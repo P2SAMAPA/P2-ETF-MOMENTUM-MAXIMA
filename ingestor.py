@@ -18,7 +18,7 @@ FILENAME = "etf_momentum_data.parquet"
 
 # Full universe - REMOVED XNT (delisted)
 UNIVERSE_FI = ['GLD', 'SLV', 'VNQ', 'TLT', 'LQD', 'HYG', 'VCIT']
-UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI', 'XLK', 'XLY', 'XLP', 'XLB', 'XLRE', 'XLU', 'XLC', 'XBI', 'XME', 'XHB', 'XSD', 'XRT', 'XAR', 'XNTK']
+UNIVERSE_EQ = ['SPY', 'QQQ', 'XLV', 'XLF', 'XLE', 'XLI', 'XLK', 'XLY', 'XLP', 'XLB', 'XLRE', 'XLU', 'XLC', 'XBI', 'XME', 'XHB', 'XSD', 'XRT', 'IWF', 'IWM', 'XAR', 'XNTK']
 BENCHMARKS = ['SPY', 'AGG']
 ALL_TICKERS = list(dict.fromkeys(UNIVERSE_FI + UNIVERSE_EQ + BENCHMARKS))
 
